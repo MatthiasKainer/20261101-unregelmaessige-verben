@@ -1,0 +1,46 @@
+name: Windows EXE
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "game.py"
+      - "vocabulary.py"
+      - "upgrades.py"
+      - "requirements.txt"
+      - "tests/**"
+      - ".github/workflows/windows.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: winexe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-exe:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Test game data and economy
+        run: python -m unittest discover -s tests -v
+      - name: Compile sources
+        run: python -m compileall -q game.py vocabulary.py upgrades.py
+      - name: Package standalone EXE
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name IrregularRange game.py
+      - name: Upload Windows EXE (7 days)
+        uses: actions/upload-artifact@v4
+        with:
+          name: IrregularRange-Windows
+          path: dist/IrregularRange.exe
+          retention-days: 7
+          if-no-files-found: error
