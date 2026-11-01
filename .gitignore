@@ -6,3 +6,6 @@ dist/
 *.spec
 .venv/
 .DS_Store
+
+assets/fonts/
+visual-preview/

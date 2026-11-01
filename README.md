@@ -96,3 +96,24 @@ Auszahlung und alle 28 animierten Waffenfamilien. Der GitHub-Workflow testet
 zusätzlich ein paar Spielbilder ohne sichtbares Fenster. Er nutzt nur einen Windows-Job, läuft nicht bei Pull-Requests
 oder reinen README-Änderungen, vermeidet doppelte laufende Builds und lädt
 nur das fertige `.exe` als Artifact hoch. Das hält die Actions-Kosten gering.
+
+
+## Grafikdesign und Schriftarten
+
+Das dunkelblaue Neon-Layout orientiert sich an den Referenz-Screenshots: 
+Hintergrund `#060914`, Panels `#121A36`, Cyan `#22E6FF`,
+Treffer-Lime `#B6FF3B`, Gold `#FFC53D`, Combo-Orange `#FF7A1A`.
+Schwebende Ziele und Kreis-Timer sind exakt auf ihre Maus-Hitboxen abgestimmt.
+Die visuellen Effekte bleiben innerhalb der Spielflaeche und verdecken keine Texte,
+Schaltflaechen oder HUD-Panels.
+
+Die drei Schriften **Russo One**, **Chakra Petch** und **Orbitron** werden bei
+GitHub Actions automatisch aus dem offiziellen Google-Fonts-Repository geladen
+und in die eigenstaendige Windows-EXE eingebettet. Die zugehoerigen
+SIL-OFL-Lizenzdateien werden ebenfalls eingebettet. Es muss nichts nachinstalliert
+werden. Ohne die Dateien verwendet der lokale Quellcode gut lesbare
+System-Schriftarten.
+
+Der guenstige Ubuntu-Workflow `Visual QA` erzeugt fuer die Designpruefung
+fuenf Pygame-Screenshots. Fuer fertige Windows-Builds wird nur der
+`Windows EXE`-Workflow auf `main` verwendet.
