@@ -880,9 +880,13 @@ class Game:
                   24, GOLD, True, family="number", max_width=74)
         self.text(self.canvas, "M\u00dcNZEN", 1180, 53, 12,
                   MUTED, False, "right", family="label", max_width=65)
-        self.button(pygame.Rect(1196, 26, 52, 52),
-                    "*" if self.sound_on else "x", CYAN,
-                    secondary=True, size=24)
+        draw_panel(self.canvas, (1196, 26, 52, 52), PANEL, CYAN,
+                   cut=9, border_width=1, shadow_offset=1)
+        pygame.draw.line(self.canvas, CYAN, (1225, 38), (1225, 59), 3)
+        pygame.draw.line(self.canvas, CYAN, (1225, 38), (1234, 35), 3)
+        pygame.draw.ellipse(self.canvas, CYAN, (1215, 55, 10, 7))
+        if not self.sound_on:
+            pygame.draw.line(self.canvas, RED, (1212, 39), (1238, 66), 2)
 
     def draw_hearts(self) -> None:
         slots = [
@@ -907,8 +911,8 @@ class Game:
                   19, ORANGE, True, "center", family="title", max_width=180)
         self.text(self.canvas, "GELERNT", 554, 648, 13, MUTED,
                   family="label")
-        self.text(self.canvas, f"{self.correct_count}/{len(VERBS)}", 669, 648,
-                  20, CYAN, True, "right", family="number", max_width=115)
+        self.text(self.canvas, f"{self.correct_count}/{len(VERBS)}", 706, 648,
+                  19, CYAN, True, "right", family="number", max_width=100)
         rounded(self.canvas, (554, 675, 150, 7), (29, 38, 69), radius=3)
         if self.correct_count:
             rounded(self.canvas, (554, 675, max(2, int(150 * self.correct_count / len(VERBS))), 7),
@@ -952,8 +956,12 @@ class Game:
                                 [(bx, 66), (bx + delta, 56), (bx + delta, 76)], 2)
         pygame.draw.line(unit, state_color, (w // 2, 5), (w // 2, 0), 3)
         pygame.draw.line(unit, state_color, (w // 2, 128), (w // 2, 150), 2)
-        self.text(unit, f"{index + 1}  ZIEL {index + 1}", w // 2, 162,
-                  14, state_color, False, "center", family="label")
+        pygame.draw.rect(unit, PANEL_DARK, (77, 148, 26, 24))
+        pygame.draw.rect(unit, state_color, (77, 148, 26, 24), 1)
+        self.text(unit, str(index + 1), 90, 160, 12, WHITE, True,
+                  "center", family="number")
+        self.text(unit, f"ZIEL {index + 1}", 111, 160,
+                  14, state_color, False, family="label")
         plate = pygame.Rect(0, 174, 240, 80)
         fill = mix(PANEL, state_color, .12 if state != "neutral" else 0.015)
         draw_panel(unit, plate, fill, state_color, cut=14,
@@ -986,7 +994,7 @@ class Game:
             rounded(self.canvas, (427, 220, max(3, int(421 * completed)), 9), CYAN, radius=4)
         timer_rect = pygame.Rect(850, 123, 99, 99)
         ratio = max(0, min(1, self.time_left / QUESTION_SECONDS))
-        tint = ORANGE if ratio < .3 else GOLD if ratio < .62 else CYAN
+        tint = ORANGE if ratio < .3 else GOLD
         pygame.draw.arc(self.canvas, (48, 58, 83), timer_rect, -math.pi / 2,
                         1.5 * math.pi, 6)
         if ratio > .001:
@@ -1094,7 +1102,7 @@ class Game:
         equipped = upgrade.id == self.equipped
         affordable = self.coins >= upgrade.cost
         tier = upgrade.tier
-        rarity_index = upgrade.theme_index % 4
+        rarity_index = (0, 1, 1, 2, 2, 3)[upgrade.theme_index % 6]
         rarity_name = RARITY_NAMES[rarity_index]
         rarity_col = RARITY_COLORS[rarity_index]
         border = GREEN if equipped or (affordable and not owned) else rarity_col
@@ -1254,14 +1262,6 @@ class Game:
             self.draw_bullet()
         elif self.phase == "impact":
             self.draw_play()
-            if self.outcome == "correct":
-                kind = self.active_round.theme.projectile if self.active_round else "chalk"
-                effect_words = {"football": "TOOOOR!", "explosion": "KABOOM!",
-                                "firework": "FEUERWERK!", "gold": "JACKPOT!",
-                                "laser": "ZAPP!", "lightning": "BLITZ!"}
-                if kind in effect_words:
-                    self.text(self.canvas, effect_words[kind], 640, 346, 40, GOLD,
-                              True, "center", True, family="title")
         elif self.phase == "reveal":
             self.draw_particles()
             self.draw_reveal()
