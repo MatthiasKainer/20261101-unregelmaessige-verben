@@ -17,6 +17,7 @@ COLORS = {theme.projectile: (theme.color, theme.accent) for theme in THEMES}
 WHITE = (245, 248, 255)
 CYAN = (34, 230, 255)
 GOLD = (255, 197, 61)
+GREEN = (182, 255, 59)
 
 
 def pt(x: float, y: float) -> tuple[int, int]:
