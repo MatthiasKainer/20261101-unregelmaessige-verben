@@ -30,14 +30,25 @@ FPS = 60
 QUESTION_SECONDS = 5.0
 STARTING_LIVES = 5
 
-BG = (13, 20, 39)
-PANEL = (29, 40, 65)
-WHITE = (244, 246, 252)
-MUTED = (145, 162, 190)
-CYAN = (89, 223, 234)
-GOLD = (255, 205, 97)
-GREEN = (91, 232, 168)
-RED = (255, 103, 116)
+BG = (6, 9, 20)
+PANEL = (18, 26, 54)
+PANEL_DARK = (10, 16, 33)
+WHITE = (241, 246, 255)
+MUTED = (167, 178, 207)
+CYAN = (34, 230, 255)
+GOLD = (255, 197, 61)
+GREEN = (182, 255, 59)
+RED = (255, 96, 126)
+ORANGE = (255, 122, 26)
+BLUE = (61, 139, 255)
+VIOLET = (181, 77, 255)
+AMBER = (255, 176, 32)
+RARITY_COLORS = {
+    "GEWÖHNLICH": MUTED,
+    "SELTEN": BLUE,
+    "EPISCH": VIOLET,
+    "LEGENDÄR": AMBER,
+}
 
 
 @dataclass
@@ -98,6 +109,84 @@ def rounded(surface: pygame.Surface, rect: pygame.Rect | tuple[int, int, int, in
     pygame.draw.rect(surface, fill, rect, border_radius=radius)
     if border:
         pygame.draw.rect(surface, border, rect, width=border_width, border_radius=radius)
+
+
+def bevel_points(rect: pygame.Rect | tuple[int, int, int, int], cut: int = 16) -> list[tuple[int, int]]:
+    r = rect if isinstance(rect, pygame.Rect) else pygame.Rect(rect)
+    cut = max(4, min(cut, r.w // 4, r.h // 4))
+    return [
+        (r.left + cut, r.top),
+        (r.right - cut, r.top),
+        (r.right, r.top + cut),
+        (r.right, r.bottom - cut),
+        (r.right - cut, r.bottom),
+        (r.left + cut, r.bottom),
+        (r.left, r.bottom - cut),
+        (r.left, r.top + cut),
+    ]
+
+
+def glow_circle(surface: pygame.Surface, center: tuple[int, int], radius: int,
+                color: tuple[int, int, int], width: int = 2, passes: int = 5) -> None:
+    """Small additive glow layer; do not allocate a full-screen surface."""
+    padding = int(radius + passes * 5 + width + 2)
+    temp = pygame.Surface((padding * 2, padding * 2), pygame.SRCALPHA)
+    for i in range(passes, 0, -1):
+        alpha = int(18 + 12 * i)
+        pygame.draw.circle(temp, (*color, alpha), (padding, padding),
+                           radius + i * 4, max(1, width + i))
+    surface.blit(temp, (center[0] - padding, center[1] - padding),
+                 special_flags=pygame.BLEND_ADD)
+
+
+def glow_text(surface: pygame.Surface, img: pygame.Surface, rect: pygame.Rect,
+              color: tuple[int, int, int], passes: int = 5) -> None:
+    """Additive text halo, bounded to the glyphs rather than the screen."""
+    pad = passes * 2 + 2
+    temp = pygame.Surface((img.get_width() + pad * 2,
+                           img.get_height() + pad * 2), pygame.SRCALPHA)
+    for i in range(passes, 0, -1):
+        layer = img.copy()
+        layer.set_alpha(16 + i * 8)
+        for dx, dy in ((-i, 0), (i, 0), (0, -i), (0, i), (-i, -i), (i, i)):
+            temp.blit(layer, (pad + dx, pad + dy))
+    surface.blit(temp, (rect.left - pad, rect.top - pad),
+                 special_flags=pygame.BLEND_ADD)
+
+
+def draw_panel(surface: pygame.Surface, rect: pygame.Rect | tuple[int, int, int, int],
+               fill: tuple[int, int, int] = PANEL,
+               border: tuple[int, int, int] = CYAN,
+               cut: int = 16, border_width: int = 2,
+               glow_color: tuple[int, int, int] | None = None,
+               shadow_offset: int = 5) -> pygame.Rect:
+    """8-corner beveled panels with a thin accent edge and optional glow."""
+    r = rect if isinstance(rect, pygame.Rect) else pygame.Rect(rect)
+    if glow_color or shadow_offset:
+        # Keep all intermediate layers local to the panel to maintain 60 FPS.
+        pad = max(9, int(max(r.w, r.h) * .09) + border_width + 4)
+        layer_size = (r.w + pad * 2, r.h + pad * 2 + max(0, shadow_offset))
+        local = pygame.Rect(pad, pad, r.w, r.h)
+        position = (r.left - pad, r.top - pad)
+        if shadow_offset:
+            shadow = pygame.Surface(layer_size, pygame.SRCALPHA)
+            pygame.draw.polygon(shadow, (0, 0, 0, 90),
+                                bevel_points(local.move(0, shadow_offset), cut))
+            surface.blit(shadow, position)
+        if glow_color:
+            temp = pygame.Surface(layer_size, pygame.SRCALPHA)
+            pts = bevel_points(local, cut)
+            cx, cy = local.center
+            for i in range(5, 0, -1):
+                scale = 1.0 + i * .03
+                expanded = [(int(cx + (px - cx) * scale),
+                             int(cy + (py - cy) * scale)) for px, py in pts]
+                pygame.draw.polygon(temp, (*glow_color, 12 + i * 9), expanded,
+                                    max(1, border_width + i // 2))
+            surface.blit(temp, position, special_flags=pygame.BLEND_ADD)
+    pygame.draw.polygon(surface, fill, bevel_points(r, cut))
+    pygame.draw.polygon(surface, border, bevel_points(r, cut), border_width)
+    return r
 
 
 def polygon_star(x: float, y: float, r: float, points: int = 5, inner: float = 0.43):
@@ -251,7 +340,8 @@ class Game:
         self.window = pygame.display.set_mode((W, H), pygame.RESIZABLE)
         self.canvas = pygame.Surface((W, H)).convert()
         self.clock = pygame.time.Clock()
-        self.fonts: dict[tuple[int, bool], pygame.font.Font] = {}
+        self.fonts: dict[tuple[str, int, bool], pygame.font.Font] = {}
+        self.font_sources = self.locate_fonts()
         self.rng = random.Random()
         self.gradient = self.make_gradient()
         self.sounds = self.make_sounds()
@@ -299,16 +389,42 @@ class Game:
         self.equipped: str | None = self.progress["equipped"]
         self.sound_on = self.progress["sound_on"]
 
-    def font(self, size: int, bold: bool = False) -> pygame.font.Font:
-        key = (size, bold)
+    def locate_fonts(self) -> dict[str, str | None]:
+        asset_dir = Path(__file__).with_name("assets") / "fonts"
+
+        def find(file_names: tuple[str, ...], families: tuple[str, ...]) -> str | None:
+            for name in file_names:
+                path = asset_dir / name
+                if path.exists():
+                    return str(path)
+            for family in families:
+                match = pygame.font.match_font(family)
+                if match:
+                    return match
+            return None
+
+        return {
+            "title": find(("RussoOne-Regular.ttf", "Russo_One.ttf"), ("russo one", "impact", "arial black")),
+            "label": find(("ChakraPetch-Regular.ttf", "ChakraPetch-Medium.ttf"), ("chakra petch", "bahnschrift", "arial")),
+            "number": find(("Orbitron-Regular.ttf", "Orbitron-Medium.ttf"), ("orbitron", "consolas", "arial")),
+        }
+
+    def font(self, size: int, bold: bool = False, family: str = "label") -> pygame.font.Font:
+        key = (family, size, bold)
         if key not in self.fonts:
-            self.fonts[key] = pygame.font.SysFont("verdana", size, bold=bold)
+            source = self.font_sources.get(family)
+            if source:
+                self.fonts[key] = pygame.font.Font(source, size)
+            else:
+                fallback = {"title": "arialblack", "label": "arial", "number": "consolas"}.get(family, "arial")
+                self.fonts[key] = pygame.font.SysFont(fallback, size, bold=bold)
         return self.fonts[key]
 
     def text(self, surface: pygame.Surface, content: str, x: float, y: float,
              size: int = 24, color: tuple[int, int, int] = WHITE,
-             bold: bool = False, align: str = "left", shadow: bool = False) -> pygame.Rect:
-        font = self.font(size, bold)
+             bold: bool = False, align: str = "left", shadow: bool = False,
+             family: str = "label") -> pygame.Rect:
+        font = self.font(size, bold, family)
         img = font.render(content, True, color)
         rect = img.get_rect()
         if align == "center":
@@ -318,16 +434,20 @@ class Game:
         else:
             rect.midleft = point(x, y)
         if shadow:
-            dark = font.render(content, True, (5, 10, 20))
+            glow_text(surface, img, rect, color)
+            dark = font.render(content, True, (2, 6, 14))
             surface.blit(dark, rect.move(2, 3))
         surface.blit(img, rect)
         return rect
 
     def make_gradient(self) -> pygame.Surface:
         gradient = pygame.Surface((W, H))
-        top, bottom = (8, 14, 33), (31, 47, 65)
+        top, bottom = BG, (9, 20, 48)
         for y in range(H):
             pygame.draw.line(gradient, mix(top, bottom, y / H), (0, y), (W, y))
+        shade = pygame.Surface((W, H), pygame.SRCALPHA)
+        pygame.draw.rect(shade, (8, 6, 18, 70), (0, 0, W, H))
+        gradient.blit(shade, (0, 0))
         return gradient
 
     def make_sounds(self) -> dict[str, pygame.mixer.Sound]:
@@ -591,11 +711,15 @@ class Game:
         c1 = 1.70158
         return 1 + (c1 + 1) * (t - 1) ** 3 + c1 * (t - 1) ** 2
 
+    def target_float(self, idx: int) -> float:
+        return math.sin(self.time_elapsed * 2.2 + idx * 0.85) * 8.0
+
     def target_rect(self, idx: int) -> pygame.Rect:
         x = (265, 640, 1015)[idx]
         progress = self.popup_progress()
-        return pygame.Rect(x - 124, 597 - max(1, int(296 * progress)), 248,
-                           max(1, int(296 * progress)))
+        height = max(1, int(296 * progress))
+        bottom = 597 + int(self.target_float(idx))
+        return pygame.Rect(x - 124, bottom - height, 248, height)
 
     def screen_mouse(self, p: tuple[int, int]) -> tuple[float, float] | None:
         sw, sh = self.window.get_size()
@@ -606,12 +730,12 @@ class Game:
 
     def click(self, pos: tuple[float, float]) -> None:
         x, y = pos
-        if pygame.Rect(1195, 25, 54, 54).collidepoint(x, y):
+        if pygame.Rect(1198, 24, 54, 58).collidepoint(x, y):
             self.sound_on = not self.sound_on
             self.save_progress()
             return
         if self.phase == "menu":
-            if pygame.Rect(452, 510, 376, 69).collidepoint(x, y):
+            if pygame.Rect(444, 498, 392, 72).collidepoint(x, y):
                 self.sound("trial")
                 self.new_run()
         elif self.phase == "play":
@@ -622,21 +746,21 @@ class Game:
                     break
             self.register_shot(hit, (x, y))
         elif self.phase == "shop":
-            if pygame.Rect(997, 152, 208, 59).collidepoint(x, y):
+            if pygame.Rect(988, 163, 220, 60).collidepoint(x, y):
                 self.trial()
-            elif pygame.Rect(989, 635, 227, 56).collidepoint(x, y):
+            elif pygame.Rect(979, 632, 237, 62).collidepoint(x, y):
                 self.sound("trial")
                 self.start_question()
-            elif pygame.Rect(62, 635, 54, 52).collidepoint(x, y):
+            elif pygame.Rect(62, 641, 54, 52).collidepoint(x, y):
                 self.page = max(0, self.page - 1)
                 self.sound("trial")
-            elif pygame.Rect(223, 635, 54, 52).collidepoint(x, y):
+            elif pygame.Rect(223, 641, 54, 52).collidepoint(x, y):
                 self.page = min((len(UPGRADES) - 1) // PAGE_SIZE, self.page + 1)
                 self.sound("trial")
             else:
                 for i, upgrade in enumerate(shop_page(self.page)):
                     col, row = i % 3, i // 3
-                    rect = pygame.Rect(60 + col * 393, 237 + row * 188, 369, 166)
+                    rect = pygame.Rect(60 + col * 393, 254 + row * 184, 369, 168)
                     if rect.collidepoint(x, y):
                         self.buy_or_equip(upgrade)
                         break
@@ -706,122 +830,165 @@ class Game:
     def button(self, rect: pygame.Rect, label: str, accent: tuple[int, int, int] = CYAN,
                secondary: bool = False, size: int = 19, disabled: bool = False) -> None:
         hover = rect.collidepoint(self.mouse) and not disabled
-        base = (32, 46, 67) if secondary or disabled else accent
-        if hover:
-            base = mix(base, WHITE, .15)
-        shadow = rect.move(0, 5)
-        rounded(self.canvas, shadow, (7, 13, 29), radius=15)
-        rounded(self.canvas, rect, base, mix(accent, WHITE, .2) if secondary else None, radius=15)
-        self.text(self.canvas, label, rect.centerx, rect.centery, size,
-                  MUTED if disabled else WHITE if secondary else (15, 28, 44),
-                  True, "center")
+        border = mix(accent, WHITE, .18) if hover else accent
+        if disabled:
+            border = (75, 86, 112)
+        fill = PANEL if secondary or disabled else mix(accent, WHITE, .08 if hover else 0.0)
+        glow = None if disabled else border
+        draw_panel(self.canvas, rect, fill, border, cut=14, border_width=2,
+                   glow_color=glow if hover or not secondary else None)
+        text_col = MUTED if disabled else WHITE if secondary else BG
+        self.text(self.canvas, label, rect.centerx, rect.centery + 1, size,
+                  text_col, True, "center", family="title")
 
     def draw_background(self) -> None:
         self.canvas.blit(self.gradient, (0, 0))
-        # Gallery spotlight beams and nighttime carnival dots.
+        grid = pygame.Surface((W, H), pygame.SRCALPHA)
+        for x in range(0, W + 1, 40):
+            pygame.draw.line(grid, (34, 230, 255, 22), (x, 0), (x, H), 1)
+        for y in range(0, H + 1, 40):
+            pygame.draw.line(grid, (34, 230, 255, 14), (0, y), (W, y), 1)
+        horizon = 534
+        pygame.draw.line(grid, (34, 230, 255, 55), (0, horizon), (W, horizon), 2)
+        for x in range(-280, W + 320, 80):
+            pygame.draw.line(grid, (34, 230, 255, 22), (W // 2, horizon), (x, H), 1)
+        for i in range(1, 8):
+            y = horizon + i * 22 + i * i * 4
+            pygame.draw.line(grid, (34, 230, 255, max(8, 28 - i * 2)), (0, y), (W, y), 1)
+        self.canvas.blit(grid, (0, 0))
         flare = pygame.Surface((W, H), pygame.SRCALPHA)
-        pygame.draw.polygon(flare, (71, 132, 173, 16), [(0, 0), (200, 0), (455, 606), (0, 606)])
-        pygame.draw.polygon(flare, (158, 94, 152, 16), [(1080, 0), (1280, 0), (1280, 606), (815, 606)])
-        self.canvas.blit(flare, (0, 0))
-        for i in range(55):
-            xx = (i * 137 + 77) % W
-            yy = (i * 89 + 31) % 380
-            if (i % 4) != 0:
-                c = int(70 + 22 * math.sin(self.time_elapsed * 1.1 + i))
-                pygame.draw.circle(self.canvas, (c, c + 12, c + 30), (xx, yy), 1)
-        # Display-stage board and hanging lights.
-        rounded(self.canvas, (32, 118, 1216, 512), (21, 32, 51), (85, 103, 132), 24, 3)
-        rounded(self.canvas, (46, 131, 1188, 485), (25, 40, 59), (46, 67, 90), 18, 1)
-        pygame.draw.line(self.canvas, (84, 91, 98), (73, 153), (1207, 153), 4)
-        for i in range(17):
-            xx = 86 + i * 69
-            tint = GOLD if i % 4 == 0 else CYAN
-            pygame.draw.line(self.canvas, (94, 104, 112), (xx, 153), (xx, 161), 2)
-            pygame.draw.circle(self.canvas, mix(tint, (70, 80, 87), .44), (xx, 166), 6)
-            pygame.draw.circle(self.canvas, tint, (xx, 166), 2)
-        # Foreground countertop.
-        rounded(self.canvas, (20, 602, 1240, 104), (42, 51, 69), (95, 97, 99), 15)
-        pygame.draw.rect(self.canvas, (66, 64, 66), (20, 616, 1240, 16))
-        pygame.draw.line(self.canvas, (163, 132, 88), (26, 617), (1254, 617), 4)
-        for xx in range(76, 1275, 164):
-            pygame.draw.line(self.canvas, (53, 63, 80), (xx, 633), (xx, 691), 2)
+        pygame.draw.ellipse(flare, (34, 230, 255, 32), (-120, 380, 540, 200))
+        pygame.draw.ellipse(flare, (181, 77, 255, 24), (860, 420, 460, 180))
+        self.canvas.blit(flare, (0, 0), special_flags=pygame.BLEND_ADD)
 
     def header(self) -> None:
-        self.text(self.canvas, "IRREGULAR", 60, 51, 30, WHITE, True, shadow=True)
-        self.text(self.canvas, "RANGE", 307, 52, 30, CYAN, True, shadow=True)
-        self.text(self.canvas, "SIMPLE PAST / SCHIESSSTAND", 62, 91, 13, MUTED, True)
-        rounded(self.canvas, (908, 31, 277, 50), (29, 47, 67), (71, 91, 111), 14)
-        draw_symbol(self.canvas, 941, 56, 15, "gold", GOLD)
-        self.text(self.canvas, f"{self.coins:,}".replace(",", ".") + " MÜNZEN", 968, 57, 18, GOLD, True)
-        self.button(pygame.Rect(1195, 25, 54, 54), "♪" if self.sound_on else "×", CYAN,
-                    secondary=True, size=24)
+        glow_circle(self.canvas, (55, 52), 16, CYAN, 2)
+        pygame.draw.circle(self.canvas, CYAN, (55, 52), 16, 2)
+        pygame.draw.circle(self.canvas, RED, (55, 52), 5)
+        pygame.draw.line(self.canvas, CYAN, (32, 52), (22, 52), 2)
+        pygame.draw.line(self.canvas, CYAN, (78, 52), (88, 52), 2)
+        pygame.draw.line(self.canvas, CYAN, (55, 29), (55, 19), 2)
+        pygame.draw.line(self.canvas, CYAN, (55, 75), (55, 85), 2)
+        self.text(self.canvas, "IRREGULAR", 92, 42, 31, WHITE, True, shadow=True, family="title")
+        self.text(self.canvas, "RANGE", 295, 42, 31, CYAN, True, shadow=True, family="title")
+        self.text(self.canvas, "SIMPLE PAST  //  SCHIESSSTAND", 92, 82, 14, MUTED, True, family="label")
+        draw_panel(self.canvas, (980, 24, 204, 58), PANEL, GOLD, cut=14, border_width=2,
+                   glow_color=GOLD)
+        draw_symbol(self.canvas, 1014, 53, 14, "gold", GOLD)
+        self.text(self.canvas, f"{self.coins:,}".replace(",", "."), 1042, 53, 24, GOLD, True,
+                  family="number")
+        self.text(self.canvas, "MÜNZEN", 1130, 53, 15, MUTED, True, family="label")
+        self.button(pygame.Rect(1198, 24, 54, 58), "♪" if self.sound_on else "×", CYAN,
+                    secondary=True, size=20)
 
     def draw_hearts(self) -> None:
-        self.text(self.canvas, "LEBEN", 83, 672, 14, MUTED, True)
+        def hud(rect: tuple[int, int, int, int], border: tuple[int, int, int]):
+            draw_panel(self.canvas, rect, PANEL, border, cut=12, border_width=2,
+                       glow_color=border)
+
+        hud((28, 620, 240, 74), CYAN)
+        self.text(self.canvas, "LEBEN", 52, 645, 13, MUTED, True, family="label")
         for n in range(STARTING_LIVES):
-            col = RED if n < self.lives else (77, 81, 100)
-            draw_symbol(self.canvas, 169 + n * 30, 670, 10, "heart", col)
-        self.text(self.canvas, "SERIE", 410, 672, 14, MUTED, True)
-        self.text(self.canvas, str(self.streak), 481, 673, 20, GOLD, True)
-        self.text(self.canvas, "GELERNT", 555, 672, 14, MUTED, True)
-        self.text(self.canvas, f"{self.correct_count}/{len(VERBS)}", 675, 673, 20, CYAN, True)
-        self.text(self.canvas, f"FEHLER: {self.deck.mistakes}", 758, 672, 13, RED, True)
-        gear = self.active_round.theme.title if self.active_round else "Standardmunition"
-        self.text(self.canvas, gear.upper()[:19], 1162, 674, 13, WHITE, True, align="right")
+            col = RED if n < self.lives else (69, 79, 107)
+            draw_symbol(self.canvas, 108 + n * 28, 670, 10, "heart", col)
+
+        hud((286, 620, 214, 74), ORANGE)
+        self.text(self.canvas, "SERIE", 311, 644, 13, MUTED, True, family="label")
+        self.text(self.canvas, f"COMBO x{max(1, self.streak)}", 393, 670, 24, ORANGE, True,
+                  "center", True, family="title")
+
+        hud((516, 620, 202, 74), CYAN)
+        self.text(self.canvas, "GELERNT", 540, 644, 13, MUTED, True, family="label")
+        self.text(self.canvas, f"{self.correct_count}/{len(VERBS)}", 617, 667, 26, CYAN, True,
+                  "center", False, family="number")
+        rounded(self.canvas, (540, 683, 152, 7), PANEL_DARK, radius=3)
+        rounded(self.canvas, (540, 683, max(6, int(152 * self.correct_count / len(VERBS))), 7), CYAN, radius=3)
+
+        hud((732, 620, 150, 74), GREEN if self.deck.mistakes == 0 else RED)
+        self.text(self.canvas, "FEHLER", 755, 644, 13, MUTED, True, family="label")
+        self.text(self.canvas, str(self.deck.mistakes), 808, 668, 30,
+                  GREEN if self.deck.mistakes == 0 else RED, True, "center", False, family="number")
+
+        hud((898, 620, 354, 74), self.active_round.theme.color if self.active_round else CYAN)
+        self.text(self.canvas, "AUSGERÜSTET", 924, 644, 13, MUTED, True, family="label")
+        gear = self.active_round.theme.title if self.active_round else "Standard"
+        self.text(self.canvas, gear.upper()[:22], 955 if self.active_round else 924, 669, 21, WHITE, True,
+                  family="title")
+        if self.active_round:
+            draw_symbol(self.canvas, 922, 669, 11, self.active_round.theme.projectile,
+                        self.active_round.theme.color, self.active_round.theme.accent)
+            self.text(self.canvas, f"LV {self.active_round.tier}", 1199, 668, 20, CYAN, True,
+                      "center", False, family="number")
 
     def draw_dummy(self, index: int, title: str, popup: float = 1.0,
                    state: str = "neutral") -> None:
         xpos = (265, 640, 1015)[index]
-        stand = (93, 91, 96)
-        pygame.draw.rect(self.canvas, stand, (xpos - 7, 529, 14, 81))
-        pygame.draw.polygon(self.canvas, (114, 109, 101),
-                            [(xpos - 40, 595), (xpos + 40, 595), (xpos + 49, 604), (xpos - 49, 604)])
+        float_y = self.target_float(index)
+        state_color = GREEN if state == "correct" else RED if state == "wrong" else CYAN
         w, h = 248, 296
         target = pygame.Surface((w, h), pygame.SRCALPHA)
-        border = GREEN if state == "correct" else RED if state == "wrong" else (163, 131, 93)
-        pygame.draw.circle(target, (159, 124, 85), (w // 2, 64), 56)
-        pygame.draw.circle(target, (211, 172, 119), (w // 2, 61), 48)
-        pygame.draw.polygon(target, (171, 135, 96),
-                            [(28, 139), (66, 110), (182, 110), (220, 139), (231, 272), (17, 272)])
-        rounded(target, (26, 122, 196, 150), (215, 176, 127), border, 13, 4)
-        pygame.draw.line(target, (121, 93, 75), (47, 113), (29, 256), 3)
-        pygame.draw.line(target, (121, 93, 75), (201, 113), (220, 256), 3)
-        pygame.draw.circle(target, (125, 88, 59), (78, 57), 5)
-        pygame.draw.circle(target, (125, 88, 59), (170, 57), 5)
-        pygame.draw.arc(target, (125, 88, 59), (104, 58, 40, 31), .15, 2.9, 2)
-        rounded(target, (36, 147, 176, 108), (35, 51, 67), border, 10, 4)
-        sz = 24 if len(title) >= 9 else 29 if len(title) >= 7 else 38
-        self.text(target, title, w // 2, 199, sz, WHITE, True, "center")
-        self.text(target, f"ZIEL {index + 1}", w // 2, 128, 13, (67, 52, 40), True, "center")
-        for cx, cy in ((46, 160), (201, 160), (46, 246), (201, 246)):
-            pygame.draw.circle(target, (108, 115, 118), (cx, cy), 3)
+        center = (w // 2, 64)
+        glow_circle(target, center, 52, state_color, 2)
+        for radius, width, color in ((52, 3, state_color), (34, 2, CYAN), (16, 2, CYAN)):
+            pygame.draw.circle(target, color, center, radius, width)
+        pygame.draw.circle(target, CYAN, center, 5)
+        for dx in (-67, 67):
+            pygame.draw.polygon(target, CYAN, [(center[0] + dx, center[1]),
+                                               (center[0] + dx - (10 if dx > 0 else -10), center[1] - 9),
+                                               (center[0] + dx - (10 if dx > 0 else -10), center[1] + 9)], 1)
+        pygame.draw.line(target, CYAN, (center[0], 116), (center[0], 164), 2)
+        self.text(target, f"ZIEL {index + 1}", center[0], 136, 14, WHITE, True, "center",
+                  family="label")
+        answer_rect = pygame.Rect(18, 176, 212, 84)
+        fill = mix(PANEL, state_color, .18 if state != "neutral" else 0.0)
+        draw_panel(target, answer_rect, fill, state_color, cut=12, border_width=2,
+                   glow_color=state_color if state != "neutral" else CYAN)
+        sz = 27 if len(title) >= 9 else 33 if len(title) >= 7 else 42
+        self.text(target, title, w // 2, answer_rect.centery + 3, sz, WHITE, True,
+                  "center", True, family="title")
         yfactor = max(.009, popup)
         target = pygame.transform.smoothscale(target, (w, max(2, int(h * yfactor))))
-        dest = target.get_rect(midbottom=(xpos, 597))
+        shadow = pygame.Surface((184, 34), pygame.SRCALPHA)
+        pygame.draw.ellipse(shadow, (34, 230, 255, 48), (0, 8, 184, 16))
+        self.canvas.blit(shadow, (xpos - 92, 584 + int(float_y * .25)), special_flags=pygame.BLEND_ADD)
+        dest = target.get_rect(midbottom=(xpos, 597 + int(float_y)))
         self.canvas.blit(target, dest)
         if state == "correct":
-            pygame.draw.circle(self.canvas, GREEN, (xpos, 337), 11, 3)
+            glow_circle(self.canvas, (xpos, 323 + int(float_y)), 12, GREEN, 2)
+            pygame.draw.circle(self.canvas, GREEN, (xpos, 323 + int(float_y)), 12, 2)
 
     def draw_play(self) -> None:
         self.header()
-        self.text(self.canvas, "WIE LAUTET DAS SIMPLE PAST VON ...?", W // 2, 204,
-                  18, MUTED, True, "center")
-        self.text(self.canvas, self.verb.infinitive.upper(), W // 2, 263,
-                  65, WHITE, True, "center", True)
+        self.text(self.canvas, "WIE LAUTET DAS SIMPLE PAST VON ...?", W // 2, 134,
+                  19, MUTED, True, "center", family="label")
+        self.text(self.canvas, self.verb.infinitive.upper(), W // 2, 204,
+                  88, WHITE, True, "center", True, family="title")
+        progress_ratio = self.correct_count / len(VERBS)
+        rounded(self.canvas, (414, 248, 430, 12), PANEL_DARK, radius=5)
+        rounded(self.canvas, (414, 248, max(1, int(430 * progress_ratio)), 12),
+                mix(CYAN, GOLD, progress_ratio), radius=5)
+        ring_rect = pygame.Rect(812, 136, 124, 124)
         timer_ratio = max(0, self.time_left / QUESTION_SECONDS)
-        timer_col = RED if timer_ratio < .3 else GOLD if timer_ratio < .55 else GREEN
-        rounded(self.canvas, (399, 304, 482, 15), (44, 58, 72), radius=7)
-        if timer_ratio > .002:
-            rounded(self.canvas, (401, 306, max(1, int(478 * timer_ratio)), 11), timer_col, radius=6)
-        self.text(self.canvas, f"{self.time_left:0.1f}s", 894, 310, 17, timer_col, True)
+        timer_col = GREEN if timer_ratio > .55 else GOLD if timer_ratio > .3 else ORANGE
+        glow_circle(self.canvas, ring_rect.center, 50, timer_col, 5)
+        pygame.draw.arc(self.canvas, mix(CYAN, PANEL, .55), ring_rect, -math.pi / 2,
+                        1.5 * math.pi, 8)
+        if timer_ratio > 0.001:
+            pygame.draw.arc(self.canvas, timer_col, ring_rect, -math.pi / 2,
+                            -math.pi / 2 + math.tau * timer_ratio, 8)
+        self.text(self.canvas, f"{self.time_left:0.1f}", ring_rect.centerx, ring_rect.centery - 4,
+                  28, WHITE, True, "center", False, family="number")
+        self.text(self.canvas, "SEK", ring_rect.centerx, ring_rect.centery + 24,
+                  13, MUTED, True, "center", family="label")
         popup = self.popup_progress()
         for i, word in enumerate(self.options):
             self.draw_dummy(i, word, popup)
         self.draw_hearts()
-        self.text(self.canvas, "KLICK AUF DIE RICHTIGE FORM · EIN SCHUSS · 5 SEKUNDEN", 641, 642,
-                  12, MUTED, True, "center")
+        self.text(self.canvas, "KLICK AUF DIE RICHTIGE FORM  ♦  EIN SCHUSS  ♦  5 SEKUNDEN", 641, 606,
+                  14, MUTED, True, "center", family="label")
         x, y = self.mouse
-        if 56 < x < 1225 and 165 < y < 610:
+        if 56 < x < 1225 and 120 < y < 610:
+            glow_circle(self.canvas, point(x, y), 18, CYAN, 2)
             pygame.draw.circle(self.canvas, CYAN, point(x, y), 18, 2)
             pygame.draw.circle(self.canvas, WHITE, point(x, y), 2)
             pygame.draw.line(self.canvas, CYAN, point(x - 25, y), point(x - 8, y), 2)
@@ -856,10 +1023,10 @@ class Game:
 
     def draw_reveal(self) -> None:
         self.header()
-        self.text(self.canvas, "WIE LAUTET DAS SIMPLE PAST VON ...?", W // 2, 204,
-                  18, MUTED, True, "center")
-        self.text(self.canvas, self.verb.infinitive.upper(), W // 2, 263, 65, WHITE, True,
-                  "center", True)
+        self.text(self.canvas, "WIE LAUTET DAS SIMPLE PAST VON ...?", W // 2, 134,
+                  19, MUTED, True, "center", family="label")
+        self.text(self.canvas, self.verb.infinitive.upper(), W // 2, 204, 88, WHITE, True,
+                  "center", True, family="title")
         for i, word in enumerate(self.options):
             if i == self.correct_index:
                 status = "correct"
@@ -868,147 +1035,167 @@ class Game:
             else:
                 status = "neutral"
             self.draw_dummy(i, word, 1, status)
-        # Large, legible correction in every case, especially after a miss.
-        box = pygame.Surface((770, 151), pygame.SRCALPHA)
-        rounded(box, (0, 0, 770, 151), (11, 22, 39), GREEN if self.outcome == "correct" else RED, 22, 4)
-        box.set_alpha(246)
-        self.canvas.blit(box, (255, 339))
+        result_color = GREEN if self.outcome == "correct" else ORANGE if self.outcome == "timeout" else RED
+        draw_panel(self.canvas, (255, 354, 770, 132), mix(PANEL, result_color, .12), result_color,
+                   cut=18, border_width=3, glow_color=result_color)
         title = "TREFFER!" if self.outcome == "correct" else "ZEIT ABGELAUFEN!" if self.outcome == "timeout" else "DANEBEN!"
-        self.text(self.canvas, title, W // 2, 374, 23,
-                  GREEN if self.outcome == "correct" else RED, True, "center")
+        self.text(self.canvas, title, W // 2, 386, 24,
+                  result_color, True, "center", False, family="title")
         ans = self.verb.simple_past.upper()
-        self.text(self.canvas, "RICHTIG: " + ans, W // 2, 423,
-                  38 if len(ans) < 9 else 31, WHITE, True, "center", True)
+        self.text(self.canvas, "RICHTIG: " + ans, W // 2, 428,
+                  38 if len(ans) < 9 else 31, WHITE, True, "center", True, family="title")
         suffix = f"+{self.winnings} MÜNZEN" if self.outcome == "correct" else "−1 LEBEN"
-        self.text(self.canvas, suffix, W // 2, 465, 17,
-                  GOLD if self.outcome == "correct" else RED, True, "center")
+        self.text(self.canvas, suffix, W // 2, 466, 19,
+                  GOLD if self.outcome == "correct" else result_color, True, "center", family="number")
         self.draw_hearts()
 
     def draw_menu(self) -> None:
-        # Three target dummies make the tutorial immediately understandable.
         for idx, choice in enumerate(("go", "went", "goed")):
             self.draw_dummy(idx, choice, 1, "correct" if idx == 1 else "neutral")
         wash = pygame.Surface((1280, 720), pygame.SRCALPHA)
-        pygame.draw.rect(wash, (6, 11, 26, 162), (0, 0, 1280, 720))
+        pygame.draw.rect(wash, (6, 9, 20, 168), (0, 0, 1280, 720))
         self.canvas.blit(wash, (0, 0))
         self.header()
-        rounded(self.canvas, (263, 178, 754, 437), (19, 32, 53), (87, 125, 146), 27, 3)
-        self.text(self.canvas, "IRREGULAR RANGE", W // 2, 252, 49, CYAN, True, "center", True)
-        self.text(self.canvas, "DER SCHIESSSTAND FÜR UNREGELMÄSSIGE VERBEN", W // 2, 308,
-                  17, WHITE, True, "center")
-        self.text(self.canvas, "Treffe in 5 Sekunden die richtige Simple-Past-Form.", W // 2, 370,
-                  18, MUTED, False, "center")
-        self.text(self.canvas, "28 VERBEN RICHTIG PRO RUN  ·  5 LEBEN  ·  280 UPGRADES", W // 2, 427,
-                  15, GOLD, True, "center")
-        self.text(self.canvas, "Münzen und gekaufte Munition bleiben gespeichert.", W // 2, 465,
-                  15, MUTED, False, "center")
-        self.button(pygame.Rect(452, 510, 376, 69), "JETZT SPIELEN", CYAN, size=23)
-        self.text(self.canvas, f"REKORD: {self.progress['best']}/{len(VERBS)}  ·  ABSCHLÜSSE: {self.progress['completions']}", W // 2, 642,
-                  15, GOLD, True, "center")
+        draw_panel(self.canvas, (256, 164, 768, 416), PANEL, CYAN, cut=22, border_width=3,
+                   glow_color=CYAN)
+        self.text(self.canvas, "IRREGULAR RANGE", W // 2, 236, 54, CYAN, True, "center", True, family="title")
+        self.text(self.canvas, "DER SCHIESSSTAND FÜR UNREGELMÄSSIGE VERBEN", W // 2, 294,
+                  18, WHITE, True, "center", family="label")
+        self.text(self.canvas, "Treffe in 5 Sekunden die richtige Simple-Past-Form.", W // 2, 356,
+                  19, MUTED, False, "center", family="label")
+        self.text(self.canvas, "28 VERBEN PRO RUN  ♦  5 LEBEN  ♦  COIN-BONUS BEI PERFEKTEM ABSCHLUSS", W // 2, 406,
+                  15, GOLD, True, "center", family="label")
+        self.text(self.canvas, "Münzen und gekaufte Munition bleiben gespeichert.", W // 2, 450,
+                  16, MUTED, False, "center", family="label")
+        self.button(pygame.Rect(444, 498, 392, 72), "JETZT SPIELEN", CYAN, size=24)
+        self.text(self.canvas, f"REKORD: {self.progress['best']}/{len(VERBS)}  ·  ABSCHLÜSSE: {self.progress['completions']}", W // 2, 618,
+                  15, GOLD, True, "center", family="label")
 
     def shop_card(self, upgrade: Upgrade, rect: pygame.Rect) -> None:
         owned = upgrade.id in self.owned
         equipped = upgrade.id == self.equipped
         affordable = self.coins >= upgrade.cost
         hover = rect.collidepoint(self.mouse)
-        border = GREEN if equipped else CYAN if owned else GOLD if affordable else (66, 87, 105)
-        rounded(self.canvas, rect.move(0, 5), (8, 15, 29), radius=16)
-        rounded(self.canvas, rect, mix((31, 45, 68), (49, 64, 84), .35 if hover else 0), border, 16, 2)
-        pygame.draw.circle(self.canvas, (22, 32, 54), (rect.x + 44, rect.y + 46), 32)
+        rarity = ("GEWÖHNLICH", "SELTEN", "EPISCH", "LEGENDÄR")[upgrade.theme_index % 4]
+        rarity_color = RARITY_COLORS[rarity]
+        border = GREEN if equipped else rarity_color
+        fill = mix(PANEL, border, .12 if hover else 0.04)
+        draw_panel(self.canvas, rect, fill, border, cut=16, border_width=2,
+                   glow_color=border if hover or equipped else None)
         theme = upgrade.theme
-        # Animate each shop thumbnail, so projectile families look different
-        # BEFORE the player buys them. Clip effects inside the preview window.
+        icon_box = pygame.Rect(rect.x + 18, rect.y + 22, 82, 82)
+        draw_panel(self.canvas, icon_box, PANEL_DARK, mix(theme.color, CYAN, .35), cut=12,
+                   border_width=1, glow_color=theme.color)
         clip = self.canvas.get_clip()
-        self.canvas.set_clip(pygame.Rect(rect.x + 6, rect.y + 8, 76, 78))
-        preview_age = (self.time_elapsed * .60 + (upgrade.theme_index % 4) * .17) % 1.05
-        draw_weapon_impact(self.canvas, theme.projectile, rect.x + 44, rect.y + 46,
-                           preview_age, min(4, upgrade.tier), draw_symbol)
+        self.canvas.set_clip(icon_box.inflate(-10, -10))
+        preview_age = (self.time_elapsed * .70 + (upgrade.theme_index % 4) * .17) % 1.05
+        draw_weapon_impact(self.canvas, theme.projectile, icon_box.centerx, icon_box.centery,
+                           preview_age, min(7, upgrade.tier), draw_symbol)
         self.canvas.set_clip(clip)
-        draw_symbol(self.canvas, rect.x + 44, rect.y + 46, 19,
+        draw_symbol(self.canvas, icon_box.centerx, icon_box.centery, 18,
                     theme.projectile, theme.color, theme.accent)
         title = theme.title.upper()
-        textsize = 17 if len(title) < 17 else 14
-        self.text(self.canvas, title, rect.x + 83, rect.y + 33, textsize, WHITE, True)
-        self.text(self.canvas, f"STUFE {upgrade.tier}/10  ·  {upgrade.name.split(' · ')[-1]}",
-                  rect.x + 83, rect.y + 65, 12, MUTED, True)
-        pygame.draw.line(self.canvas, (67, 82, 103), (rect.x + 20, rect.y + 91),
-                         (rect.right - 20, rect.y + 91), 1)
+        textsize = 18 if len(title) < 15 else 15
+        self.text(self.canvas, title, rect.x + 118, rect.y + 32, textsize, WHITE, True,
+                  family="title")
+        badge = pygame.Rect(rect.x + 118, rect.y + 52, 104, 24)
+        draw_panel(self.canvas, badge, mix(PANEL, rarity_color, .15), rarity_color, cut=8,
+                   border_width=1)
+        self.text(self.canvas, rarity, badge.centerx, badge.centery + 1, 11, rarity_color,
+                  True, "center", family="label")
+        self.text(self.canvas, f"STUFE {upgrade.tier}/10 · {upgrade.name.split(' · ')[-1]}",
+                  rect.x + 118, rect.y + 88, 13, MUTED, True, family="label")
         for n in range(10):
-            pygame.draw.rect(self.canvas, theme.color if n < upgrade.tier else (60, 75, 94),
-                             (rect.x + 20 + n * 19, rect.y + 108, 14, 6), border_radius=2)
+            seg = pygame.Rect(rect.x + 18 + n * 33, rect.y + 107, 28, 7)
+            rounded(self.canvas, seg, theme.color if n < upgrade.tier else PANEL_DARK, radius=3)
         state = "ANGELEGT" if equipped else "AUSRÜSTEN" if owned else "KAUFEN" if affordable else "ZU TEUER"
-        self.text(self.canvas, state, rect.x + 21, rect.y + 143, 13, border, True)
-        self.text(self.canvas, "IM BESITZ" if owned else f"{upgrade.cost}  MÜNZEN", rect.right - 20,
-                  rect.y + 143, 13, GREEN if owned else GOLD, True, "right")
+        action_rect = pygame.Rect(rect.x + 18, rect.bottom - 44, 114, 33)
+        action_fill = GREEN if (affordable and not owned) else PANEL_DARK if not equipped else mix(PANEL, GREEN, .2)
+        action_border = GREEN if equipped or (affordable and not owned) else MUTED
+        draw_panel(self.canvas, action_rect, action_fill, action_border, cut=10, border_width=1)
+        self.text(self.canvas, state, action_rect.centerx, action_rect.centery + 1, 13,
+                  BG if affordable and not owned else WHITE, True, "center", family="title")
+        cost_color = GREEN if owned else GOLD if affordable else MUTED
+        self.text(self.canvas, "IM BESITZ" if owned else f"{upgrade.cost}", rect.right - 42,
+                  rect.bottom - 27, 21, cost_color, True, "right", False, family="number")
+        if not owned:
+            draw_symbol(self.canvas, rect.right - 78, rect.bottom - 27, 10, "gold", GOLD)
 
     def draw_shop(self) -> None:
         self.header()
-        self.text(self.canvas, "MUNITIONS-WERKSTATT", 62, 120, 30, WHITE, True)
-        self.text(self.canvas, f"{self.correct_count}/{len(VERBS)} GELERNT  ·  {len(self.owned)}/{len(UPGRADES)} UPGRADES", 1196, 119,
-                  15, MUTED, True, "right")
-        rounded(self.canvas, (60, 145, 1160, 79), (42, 60, 76), (98, 142, 161), 15)
-        draw_symbol(self.canvas, 103, 184, 24, self.trial_candidate.theme.projectile,
+        self.text(self.canvas, "MUNITIONS-WERKSTATT", 60, 116, 34, WHITE, True, family="title")
+        draw_panel(self.canvas, (914, 100, 152, 42), PANEL, CYAN, cut=10, border_width=2)
+        self.text(self.canvas, f"{self.correct_count}/{len(VERBS)} GELERNT", 990, 121, 16, CYAN, True,
+                  "center", False, family="number")
+        draw_panel(self.canvas, (1080, 100, 168, 42), PANEL, MUTED, cut=10, border_width=2)
+        self.text(self.canvas, f"{len(self.owned)}/{len(UPGRADES)} UPGRADES", 1164, 121, 16, MUTED, True,
+                  "center", False, family="number")
+        draw_panel(self.canvas, (60, 150, 1160, 86), mix(PANEL, CYAN, .07), CYAN, cut=16, border_width=2,
+                   glow_color=CYAN)
+        draw_symbol(self.canvas, 102, 193, 24, self.trial_candidate.theme.projectile,
                     self.trial_candidate.theme.color, self.trial_candidate.theme.accent)
-        self.text(self.canvas, "KOSTENLOSER PROBESCHUSS", 152, 169, 18, CYAN, True)
+        self.text(self.canvas, "KOSTENLOSER PROBESCHUSS", 148, 180, 22, CYAN, True, family="title")
         sample = f"{self.trial_candidate.theme.title} · Stufe {self.trial_candidate.tier} · nur nächste Frage"
-        self.text(self.canvas, sample, 152, 201, 14, WHITE)
-        self.button(pygame.Rect(997, 152, 208, 59),
-                    "AUSGEWÄHLT ✓" if self.trial_pending else "GRATIS TESTEN", GREEN,
-                    secondary=bool(self.trial_pending), size=16)
+        self.text(self.canvas, sample, 148, 209, 15, WHITE, family="label")
+        self.button(pygame.Rect(988, 163, 220, 60),
+                    "AUSGEWÄHLT ✓" if self.trial_pending else "GRATIS TESTEN", CYAN,
+                    secondary=bool(self.trial_pending), size=18)
         for i, upgrade in enumerate(shop_page(self.page)):
             col, row = i % 3, i // 3
-            rect = pygame.Rect(60 + col * 393, 237 + row * 188, 369, 166)
+            rect = pygame.Rect(60 + col * 393, 254 + row * 184, 369, 168)
             self.shop_card(upgrade, rect)
         maxpage = (len(UPGRADES) - 1) // PAGE_SIZE
-        self.button(pygame.Rect(62, 635, 54, 52), "‹", CYAN, secondary=True, size=27,
+        self.button(pygame.Rect(62, 641, 54, 52), "‹", CYAN, secondary=True, size=27,
                     disabled=self.page == 0)
-        self.text(self.canvas, f"SEITE {self.page + 1} / {maxpage + 1}", 169, 661,
-                  15, WHITE, True, "center")
-        self.button(pygame.Rect(223, 635, 54, 52), "›", CYAN, secondary=True, size=27,
+        self.text(self.canvas, f"SEITE {self.page + 1} / {maxpage + 1}", 169, 666,
+                  16, WHITE, True, "center", family="number")
+        self.button(pygame.Rect(223, 641, 54, 52), "›", CYAN, secondary=True, size=27,
                     disabled=self.page == maxpage)
-        self.text(self.canvas, "Klick: kaufen oder ausrüsten", 307, 660, 14, MUTED)
-        self.button(pygame.Rect(989, 635, 227, 56), "NÄCHSTE FRAGE  ›", GREEN, size=17)
+        self.text(self.canvas, "Klick: kaufen oder ausrüsten", 307, 665, 14, MUTED, family="label")
+        self.button(pygame.Rect(979, 632, 237, 62), "NÄCHSTE FRAGE  ›", CYAN, size=18)
         if self.toast and self.toast_age < 2.4:
-            rounded(self.canvas, (396, 634, 570, 49), (54, 65, 83), GOLD, 12)
-            self.text(self.canvas, self.toast[:55], 681, 659, 13, WHITE, True, "center")
+            draw_panel(self.canvas, (392, 634, 574, 52), mix(PANEL, GOLD, .12), GOLD, cut=12, border_width=2,
+                       glow_color=GOLD)
+            self.text(self.canvas, self.toast[:55], 679, 660, 14, WHITE, True, "center", family="label")
 
     def draw_end(self) -> None:
         self.header()
         if self.completed:
-            # A victory lap of falling coins and stars, independent of selected ammo.
             for i in range(47):
                 px = 59 + (i * 179) % 1175
                 py = ((i * 83 + self.victory_age * (40 + i % 6 * 9)) % 650) + 15
                 draw_symbol(self.canvas, px, py, 4 + i % 7,
                             "gold" if i % 3 == 0 else "star",
-                            GOLD if i % 3 == 0 else (118, 226, 238), WHITE)
-        rounded(self.canvas, (241, 158, 798, 514), (21, 34, 56),
-                GOLD if self.completed else (106, 135, 158), 24, 3)
+                            GOLD if i % 3 == 0 else CYAN, WHITE)
+        frame = GOLD if self.completed else RED
+        draw_panel(self.canvas, (241, 158, 798, 514), PANEL, frame, cut=22, border_width=3,
+                   glow_color=frame)
         if self.completed:
             self.text(self.canvas, "ALLE 28 VERBEN GESCHAFFT!", W // 2, 224,
-                      34, GOLD, True, "center", True)
+                      36, GOLD, True, "center", True, family="title")
             self.text(self.canvas, "Jedes Verb einmal richtig – gut gemacht!", W // 2, 280,
-                      18, GREEN, True, "center")
+                      18, GREEN, True, "center", family="label")
         else:
             self.text(self.canvas, "RUNDE BEENDET", W // 2, 224,
-                      42, RED, True, "center", True)
+                      42, RED, True, "center", True, family="title")
             self.text(self.canvas, "Keine Leben mehr. Versuch die übrigen Verben erneut!", W // 2, 280,
-                      16, MUTED, False, "center")
+                      16, MUTED, False, "center", family="label")
         self.text(self.canvas, f"{self.correct_count}/{len(VERBS)}", 474, 366,
-                  58, CYAN, True, "center", True)
-        self.text(self.canvas, "VERBEN BEHERRSCHT", 474, 411, 14, MUTED, True, "center")
+                  58, CYAN, True, "center", True, family="number")
+        self.text(self.canvas, "VERBEN BEHERRSCHT", 474, 411, 14, MUTED, True, "center", family="label")
         self.text(self.canvas, str(self.deck.mistakes), 804, 366,
-                  58, RED if self.deck.mistakes else GREEN, True, "center", True)
-        self.text(self.canvas, "FEHLER IN DIESEM RUN", 804, 411, 14, MUTED, True, "center")
+                  58, RED if self.deck.mistakes else GREEN, True, "center", True, family="number")
+        self.text(self.canvas, "FEHLER IN DIESEM RUN", 804, 411, 14, MUTED, True, "center", family="label")
         if self.completed:
-            rounded(self.canvas, (358, 437, 564, 67), (64, 73, 58), GOLD, 15, 2)
+            draw_panel(self.canvas, (358, 437, 564, 67), mix(PANEL, GOLD, .12), GOLD, cut=14,
+                       border_width=2, glow_color=GOLD)
             self.text(self.canvas, f"+{self.bonus_awarded:,} BONUS-MÜNZEN".replace(",", "."),
-                      W // 2, 470, 27, GOLD, True, "center")
+                      W // 2, 470, 27, GOLD, True, "center", False, family="title")
         else:
             self.text(self.canvas, "ABSCHLUSS-BONUS: ALLE VERBEN RICHTIG LÖSEN",
-                      W // 2, 472, 15, MUTED, True, "center")
+                      W // 2, 472, 15, MUTED, True, "center", family="label")
         self.text(self.canvas, f"BESTER RUN: {self.progress['best']}/{len(VERBS)}  ·  ABGESCHLOSSEN: {self.progress['completions']}",
-                  W // 2, 517, 13, MUTED, True, "center")
+                  W // 2, 517, 13, MUTED, True, "center", family="label")
         self.button(pygame.Rect(449, 540, 382, 58), "NOCHMAL SPIELEN", CYAN, size=21)
         self.button(pygame.Rect(501, 611, 278, 44), "BEENDEN", CYAN, secondary=True, size=16)
 
@@ -1030,7 +1217,7 @@ class Game:
                                 "laser": "ZAPP!", "lightning": "BLITZ!"}
                 if kind in effect_words:
                     self.text(self.canvas, effect_words[kind], 640, 346, 40, GOLD,
-                              True, "center", True)
+                              True, "center", True, family="title")
         elif self.phase == "reveal":
             self.draw_particles()
             self.draw_reveal()
@@ -1049,7 +1236,7 @@ class Game:
         scale = min(sw / W, sh / H)
         dw, dh = max(1, int(W * scale)), max(1, int(H * scale))
         x, y = (sw - dw) // 2, (sh - dh) // 2
-        self.window.fill((5, 9, 19))
+        self.window.fill(BG)
         image = self.canvas if (dw, dh) == (W, H) else pygame.transform.smoothscale(self.canvas, (dw, dh))
         self.window.blit(image, (x, y))
         pygame.display.flip()

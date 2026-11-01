@@ -20,7 +20,7 @@ def xy(x: float, y: float) -> tuple[int, int]:
     return int(x), int(y)
 
 
-def fade(color: Color, amount: float, bg: Color = (25, 40, 59)) -> Color:
+def fade(color: Color, amount: float, bg: Color = (6, 9, 20)) -> Color:
     a = max(0.0, min(1.0, amount))
     return tuple(int(bg[i] * (1 - a) + color[i] * a) for i in range(3))
 
