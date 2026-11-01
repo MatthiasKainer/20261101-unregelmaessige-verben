@@ -146,8 +146,8 @@ def impact(surface: pygame.Surface, kind: str, x: float, y: float,
     theme = next(t for t in THEMES if t.projectile == kind)
     c, a = theme.color, theme.accent
     bright = fade(c, energy)
-    s = 1.0 + tier * .07
-    radius = (24 + 155 * p) * s
+    s = 1.0 + tier * .035
+    radius = (16 + 76 * p) * s
 
     def dot(angle: float, distance: float, size: float, color: Color, symbol_kind: str | None = None):
         px, py = x + math.cos(angle) * distance, y + math.sin(angle) * distance
@@ -255,7 +255,7 @@ def impact(surface: pygame.Surface, kind: str, x: float, y: float,
     elif kind == "bubble":
         for j in range(13 + tier):
             dx = math.sin(j * 2.4) * radius * .7
-            py = y - ((j * 29) % 100 + 110 * p) * s
+            py = y - ((j * 29) % 76 + 52 * p) * s
             rr = max(3, int((7 + j % 12) * energy))
             pygame.draw.circle(surface, fade(a, energy), xy(x + dx, py), rr, 2)
             pygame.draw.circle(surface, (235, 252, 255), xy(x + dx - 2, py - 2), 2)

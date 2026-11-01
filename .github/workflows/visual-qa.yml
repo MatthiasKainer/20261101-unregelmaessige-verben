@@ -1,0 +1,35 @@
+name: Visual QA (cheap Ubuntu only)
+
+on:
+  push:
+    branches: [ui-qa]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  visual-qa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install pygame (no EXE build)
+        run: python -m pip install pygame-ce==2.5.8
+      - name: Download OFL fonts for QA
+        run: python scripts/fetch_fonts.py
+      - name: Capture and validate screenshot states
+        env:
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+        run: python scripts/visual_qa.py
+      - name: Upload five previews
+        uses: actions/upload-artifact@v4
+        with:
+          name: Visual-QA-PNGs
+          path: visual-preview/*.png
+          retention-days: 2
