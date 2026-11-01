@@ -88,3 +88,49 @@ def validate() -> None:
 
 
 validate()
+
+
+class MasteryDeck:
+    """A finite run: missed verbs return later; only correct answers count.
+
+    Call next() once, then record() once. The run ends after every verb
+    has been answered correctly, never just after a fixed number of shots.
+    """
+
+    def __init__(self, rng: random.Random | None = None):
+        self.rng = rng or random.Random()
+        self.remaining = list(VERBS)
+        self.rng.shuffle(self.remaining)
+        self.current: Verb | None = None
+        self.mastered: set[str] = set()
+        self.mistakes = 0
+        self.attempts = 0
+
+    @property
+    def complete(self) -> bool:
+        return len(self.mastered) == len(VERBS)
+
+    @property
+    def completed_count(self) -> int:
+        return len(self.mastered)
+
+    def next(self) -> Verb:
+        if self.current is not None:
+            raise RuntimeError("Resolve the current verb before requesting another")
+        if not self.remaining:
+            raise StopIteration("All verbs answered correctly")
+        self.current = self.remaining.pop()
+        return self.current
+
+    def record(self, correct: bool) -> None:
+        if self.current is None:
+            raise RuntimeError("No active verb to resolve")
+        self.attempts += 1
+        if correct:
+            self.mastered.add(self.current.infinitive)
+        else:
+            self.mistakes += 1
+            # Put it at the *back* of the shuffled deck, not next on top.
+            # With only one unsolved verb it can of course recur immediately.
+            self.remaining.insert(0, self.current)
+        self.current = None

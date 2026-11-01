@@ -25,19 +25,29 @@ Das Artifact bleibt 7 Tage verfügbar; erneutes Bauen nur bei Bedarf.
   **genau ein Leben**. Du startest mit fünf Leben.
 - Nach Fehlern wird die korrekte Antwort groß eingeblendet.
 - Richtige Treffer bringen Münzen; schnellere Treffer und Serien mehr.
-- **Nach jeder Frage** öffnet der Shop. Kaufbare Verbesserungen bleiben
-  dauerhaft freigeschaltet und lassen sich immer wieder ausrüsten.
+- **Jeder Run hat ein klares Ziel:** alle **28 unterschiedlichen Verben**
+  mindestens einmal richtig beantworten. Richtige Antworten verlassen den
+  Stapel; falsche Antworten und Zeitüberschreitungen kommen später erneut.
+- Nach jeder Frage **außer der letzten erfolgreichen** öffnet der Shop.
+  Kaufbare Verbesserungen bleiben dauerhaft freigeschaltet und lassen sich
+  immer wieder ausrüsten.
 - **Garantiert kostenlos:** In jedem Shop gibt es eine Probepatrone für die
   nächste Frage. Damit steht auch bei **0 Münzen** eine Upgrade-Option offen.
-- Nach dem fünften Fehlversuch startet auf Wunsch ein neuer Durchgang.
+- Nach dem fünften Fehlversuch ist der Run verloren. Werden alle 28 Verben
+  richtig beantwortet, endet der Run mit einer **Extra-Münzprämie**:
+  **1.800 Münzen bei null Fehlern**, minus **300 pro Fehler** (bei ein bis vier
+  Fehlern: 1.500 / 1.200 / 900 / 600). Die Prämie wird nur einmal ausgezahlt.
+  Abschlüsse und der beste Run bleiben gespeichert.
 
 ## 280 Upgrades
 
 Es gibt **28 Munitionsfamilien mit je 10 Stufen**. Darunter: Feuerwerk,
 Explosion, Fußball, Laser, Seifenblasen, Raketen, Schneebälle, Galaxien,
-Pizzas und Kometen. Die Familien haben eigene gezeichnete Geschosse und
-Trefferpartikel; höhere Stufen verstärken Spuren, Splitter, Stoßwellen und
-Bühneneffekte. 280 Einträge sind einzeln kaufbar. Über die Shop-Pfeile sind
+Pizzas und Kometen. Die Familien haben nicht nur unterschiedliche Geschosse, sondern jeweils
+**eigene Flugbahnen, Leuchtspuren und Einschlaganimationen**. Laser schießen
+Lichtstrahlen, Fußballtore erscheinen als Netze, Explosionen als Comic-Bursts,
+Feuerwerk als vielfarbige Himmelssterne und Seifenblasen schweben nach oben.
+Höhere Stufen verstärken Spuren, Splitter, Stoßwellen und Bühneneffekte. 280 Einträge sind einzeln kaufbar. Über die Shop-Pfeile sind
 alle erreichbar, ohne dass der Shop von Anfang an alles kostenlos macht.
 
 Die Fortschrittsdatei liegt unter
@@ -80,7 +90,9 @@ python game.py --smoke-test
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name IrregularRange game.py
 ```
 
-Die Grafik und Sounds werden zur Laufzeit ohne externe Assets erzeugt. Der
-GitHub-Workflow nutzt nur einen Windows-Job, läuft nicht bei Pull-Requests
+Die Grafik und Sounds werden zur Laufzeit ohne externe Assets erzeugt. Die
+Tests prüfen den endlichen Run, wiederholte falsche Verben, einmalige Bonus-
+Auszahlung und alle 28 animierten Waffenfamilien. Der GitHub-Workflow testet
+zusätzlich ein paar Spielbilder ohne sichtbares Fenster. Er nutzt nur einen Windows-Job, läuft nicht bei Pull-Requests
 oder reinen README-Änderungen, vermeidet doppelte laufende Builds und lädt
 nur das fertige `.exe` als Artifact hoch. Das hält die Actions-Kosten gering.

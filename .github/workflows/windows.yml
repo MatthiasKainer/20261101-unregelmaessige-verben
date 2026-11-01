@@ -7,6 +7,8 @@ on:
       - "game.py"
       - "vocabulary.py"
       - "upgrades.py"
+      - "weapon_fx.py"
+      - "weapon_visuals.py"
       - "requirements.txt"
       - "tests/**"
       - ".github/workflows/windows.yml"
@@ -34,7 +36,12 @@ jobs:
       - name: Test game data and economy
         run: python -m unittest discover -s tests -v
       - name: Compile sources
-        run: python -m compileall -q game.py vocabulary.py upgrades.py
+        run: python -m compileall -q game.py vocabulary.py upgrades.py weapon_fx.py weapon_visuals.py
+      - name: Offscreen gameplay smoke test
+        env:
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+        run: python game.py --smoke-test
       - name: Package standalone EXE
         run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name IrregularRange game.py
       - name: Upload Windows EXE (7 days)

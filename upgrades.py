@@ -125,3 +125,13 @@ def validate() -> None:
 
 
 validate()
+
+
+def completion_bonus(mistakes: int) -> int:
+    """Bonus for finishing every verb; awarded once on a successful run.
+
+    A perfect 28/28 earns 1800 coins; each wrong answer or timeout costs
+    300 bonus coins. Five mistakes exhaust the initial lives, so only runs
+    with 0-4 mistakes are normally eligible for a completion bonus.
+    """
+    return max(0, 1800 - 300 * max(0, int(mistakes)))

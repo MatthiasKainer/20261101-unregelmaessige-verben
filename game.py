@@ -19,9 +19,11 @@ import pygame
 
 from upgrades import (
     PAGE_SIZE, THEMES, UPGRADES, UPGRADE_BY_ID, Upgrade,
-    recommended_page, reward, shop_page,
+    recommended_page, reward, shop_page, completion_bonus,
 )
-from vocabulary import VERBS, Verb, VerbDeck
+from vocabulary import VERBS, Verb, MasteryDeck
+from weapon_fx import WEAPONS, flight_point
+from weapon_visuals import trail as draw_weapon_trail, impact as draw_weapon_impact
 
 W, H = 1280, 720
 FPS = 60
@@ -51,6 +53,16 @@ class Particle:
     kind: str
     spin: float = 0.0
     drag: float = 0.985
+
+
+@dataclass
+class HitEffect:
+    kind: str
+    x: float
+    y: float
+    tier: int
+    age: float = 0.0
+    duration: float = 1.05
 
 
 @dataclass
@@ -116,7 +128,8 @@ def draw_symbol(surface: pygame.Surface, x: float, y: float, size: float,
             pygame.draw.circle(surface, color, point(cx + math.cos(a) * s, cy + math.sin(a) * s), max(2, s // 3))
     elif kind == "rubber":
         pygame.draw.circle(surface, color, (cx, cy), s)
-        pygame.draw.arc(surface, accent, (cx - s + 3, cy - s + 3, 2 * s - 6, 2 * s - 6), 1, 2.65, 3)
+        pygame.draw.arc(surface, accent, (cx - s + 3, cy - s + 3,
+                                         max(3, 2 * s - 6), max(3, 2 * s - 6)), 1, 2.65, 3)
     elif kind == "laser":
         pygame.draw.line(surface, color, (cx - 2 * s, cy), (cx + 2 * s, cy), max(2, s // 2))
         pygame.draw.circle(surface, accent, (cx, cy), max(2, s // 3))
@@ -246,7 +259,7 @@ class Game:
         self.phase = "menu"
         self.time_elapsed = 0.0
         self.mouse = (0, 0)
-        self.deck = VerbDeck(self.rng)
+        self.deck = MasteryDeck(self.rng)
         self.verb: Verb = VERBS[9]
         self.options: tuple[str, ...] = ("go", "went", "goed")
         self.correct_index = 1
@@ -259,12 +272,16 @@ class Game:
         self.shot_to = (W // 2, H // 2)
         self.flight_trail: list[tuple[float, float]] = []
         self.reveal_elapsed = 0.0
+        self.impact_elapsed = 0.0
         self.outcome = ""
         self.winnings = 0
         self.lives = STARTING_LIVES
         self.streak = 0
         self.correct_count = 0
         self.questions = 0
+        self.completed = False
+        self.bonus_awarded = 0
+        self.victory_age = 0.0
         self.active_round: Upgrade | None = None
         self.trial_pending: str | None = None
         self.trial_candidate: Upgrade = UPGRADES[-1]
@@ -273,6 +290,7 @@ class Game:
         self.toast_age = 0.0
         self.particles: list[Particle] = []
         self.rings: list[Ring] = []
+        self.hit_effects: list[HitEffect] = []
         self.shake = 0.0
         self.flash = 0.0
         self.progress = self.load_progress()
@@ -324,6 +342,15 @@ class Game:
             "buy": (650, 1000, .20),
             "coins": (740, 1160, .17),
             "trial": (540, 700, .13),
+            "laser": (1100, 270, .22),
+            "kick": (110, 230, .15),
+            "electric": (1260, 430, .16),
+            "splash": (240, 630, .20),
+            "bubbles": (700, 940, .20),
+            "party": (500, 1280, .24),
+            "chime": (840, 1340, .24),
+            "boom": (220, 75, .29),
+            "whoosh": (310, 780, .22),
         }
         rate = 22050
         for name, (low, high, duration) in presets.items():
@@ -335,7 +362,8 @@ class Game:
                 freq = lerp(low, high, t)
                 phase += 2 * math.pi * freq / rate
                 envelope = (1 - t) ** 1.75 * min(1, t * 22)
-                noise = self.rng.uniform(-.2, .2) if name in ("shoot", "miss") else 0
+                noise = self.rng.uniform(-.3, .3) if name in (
+                    "shoot", "miss", "boom", "splash", "whoosh", "kick") else 0
                 samples.append(int(10500 * envelope * (math.sin(phase) * .85 + noise)))
             try:
                 result[name] = pygame.mixer.Sound(buffer=samples.tobytes())
@@ -349,7 +377,8 @@ class Game:
 
     def load_progress(self) -> dict:
         default = {"coins": 0, "owned": [], "equipped": None, "best": 0,
-                   "total_hits": 0, "runs": 0, "sound_on": True}
+                   "total_hits": 0, "runs": 0, "completions": 0,
+                   "best_mistakes": None, "sound_on": True}
         path = save_folder() / "progress.json"
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
@@ -357,9 +386,12 @@ class Game:
                 return default
             values = {**default, **raw}
             values["coins"] = max(0, min(99_999_999, int(values["coins"])))
-            values["best"] = max(0, int(values["best"]))
+            values["best"] = max(0, min(len(VERBS), int(values["best"])))
             values["total_hits"] = max(0, int(values["total_hits"]))
             values["runs"] = max(0, int(values["runs"]))
+            values["completions"] = max(0, int(values["completions"]))
+            if values["best_mistakes"] is not None:
+                values["best_mistakes"] = max(0, int(values["best_mistakes"]))
             owned = values["owned"] if isinstance(values["owned"], list) else []
             values["owned"] = [x for x in owned if isinstance(x, str) and x in UPGRADE_BY_ID]
             if values["equipped"] not in values["owned"]:
@@ -386,13 +418,22 @@ class Game:
         self.correct_count = 0
         self.questions = 0
         self.streak = 0
+        self.completed = False
+        self.bonus_awarded = 0
+        self.victory_age = 0.0
         self.trial_pending = None
-        self.deck = VerbDeck(self.rng)
+        self.hit_effects.clear()
+        self.particles.clear()
+        self.rings.clear()
+        self.deck = MasteryDeck(self.rng)
         self.progress["runs"] += 1
         self.save_progress()
         self.start_question()
 
     def start_question(self) -> None:
+        if self.deck.complete:
+            self.end_run()
+            return
         self.verb = self.deck.next()
         self.options = self.verb.options(self.rng)
         self.correct_index = self.options.index(self.verb.simple_past)
@@ -409,6 +450,9 @@ class Game:
         self.sound("pop")
 
     def start_shop(self) -> None:
+        if self.deck.complete or self.lives <= 0:
+            self.end_run()
+            return
         self.phase = "shop"
         self.page = recommended_page(self.coins, self.owned)
         self.trial_pending = None
@@ -418,9 +462,26 @@ class Game:
         self.save_progress()
 
     def end_run(self) -> None:
+        if self.phase == "end":
+            return  # The completion bonus must never be awarded twice.
+        self.completed = self.deck.complete
+        self.bonus_awarded = 0
+        self.victory_age = 0.0
         self.phase = "end"
         self.progress["best"] = max(self.progress["best"], self.correct_count)
         self.progress["total_hits"] += self.correct_count
+        if self.completed:
+            self.bonus_awarded = completion_bonus(self.deck.mistakes)
+            self.coins += self.bonus_awarded
+            self.progress["completions"] += 1
+            prev = self.progress["best_mistakes"]
+            if prev is None or self.deck.mistakes < prev:
+                self.progress["best_mistakes"] = self.deck.mistakes
+            self.sound("coins")
+            self.flash = .6
+            for i in range(5):
+                self.hit_effects.append(HitEffect("firework", 260 + 185 * i,
+                                                  235 + 23 * (i % 2), 4, age=-i * .13))
         self.save_progress()
 
     def register_shot(self, target: int | None, clicked_at: tuple[float, float] | None = None,
@@ -430,22 +491,28 @@ class Game:
         self.chosen_index = target
         self.outcome = "timeout" if timeout else "correct" if target == self.correct_index else "wrong"
         self.winnings = reward(self.streak + 1, self.time_left) if self.outcome == "correct" else 0
-        self.flight_seconds = (0.16 if self.active_round and self.active_round.tier >= 2 else 0.23)
+        kind = self.active_round.theme.projectile if self.active_round else "chalk"
+        self.flight_seconds = WEAPONS[kind].travel * (
+            .86 if self.active_round and self.active_round.tier >= 2 else 1.0)
         self.flight_time = 0.0
         self.shot_from = (W / 2, H - 13)
         self.shot_to = clicked_at or (640, 472)
         self.flight_trail = []
         self.phase = "flight"
-        self.sound("shoot" if not timeout else "miss")
+        self.sound(WEAPONS[kind].pitch if not timeout else "miss")
         if timeout:
             self.flight_seconds = 0.001
 
     def resolve(self) -> None:
-        self.phase = "reveal"
+        self.phase = "impact"
+        self.impact_elapsed = 0.0
         self.reveal_elapsed = 0.0
-        if self.outcome == "correct":
+        success = self.outcome == "correct"
+        # Wrong answers, misses and timeouts go back into this run's deck.
+        self.deck.record(success)
+        if success:
             self.streak += 1
-            self.correct_count += 1
+            self.correct_count = self.deck.completed_count
             self.coins += self.winnings
             self.sound("hit")
             self.spawn_burst(self.shot_to, True)
@@ -463,6 +530,8 @@ class Game:
         theme = self.active_round.theme if self.active_round else THEMES[0]
         count = (24 + tier * 8) if success else 12
         kind = theme.projectile if success else "chalk"
+        if success:
+            self.hit_effects.append(HitEffect(kind, x, y, tier))
         colors = [theme.color, theme.accent, GOLD, WHITE] if success else [RED, (222, 121, 130)]
         for _ in range(count):
             a = self.rng.uniform(0, math.tau)
@@ -516,11 +585,15 @@ class Game:
         self.sound("trial")
         self.flash_message("PROBEPATRONE IST FÜR DIE NÄCHSTE FRAGE BEREIT")
 
+    def popup_progress(self) -> float:
+        t = min(1.0, self.question_age / .46)
+        # Back-easing: the target overshoots, bounces and settles like a spring.
+        c1 = 1.70158
+        return 1 + (c1 + 1) * (t - 1) ** 3 + c1 * (t - 1) ** 2
+
     def target_rect(self, idx: int) -> pygame.Rect:
         x = (265, 640, 1015)[idx]
-        f = min(1.0, self.question_age / 0.46)
-        # Mechanical pop-up: fast start, overshoots slightly and settles.
-        progress = 1 - (1 - f) ** 3
+        progress = self.popup_progress()
         return pygame.Rect(x - 124, 597 - max(1, int(296 * progress)), 248,
                            max(1, int(296 * progress)))
 
@@ -568,9 +641,9 @@ class Game:
                         self.buy_or_equip(upgrade)
                         break
         elif self.phase == "end":
-            if pygame.Rect(449, 511, 382, 64).collidepoint(x, y):
+            if pygame.Rect(449, 540, 382, 58).collidepoint(x, y):
                 self.new_run()
-            elif pygame.Rect(501, 591, 278, 52).collidepoint(x, y):
+            elif pygame.Rect(501, 611, 278, 44).collidepoint(x, y):
                 self.running = False
 
     def update(self, dt: float) -> None:
@@ -588,20 +661,30 @@ class Game:
             self.question_age += dt
             self.flight_time += dt
             p = min(1, self.flight_time / self.flight_seconds)
-            xy = (lerp(self.shot_from[0], self.shot_to[0], p),
-                  lerp(self.shot_from[1], self.shot_to[1], p))
+            kind = self.active_round.theme.projectile if self.active_round else "chalk"
+            xy = flight_point(kind, self.shot_from, self.shot_to, p)
             self.flight_trail.append(xy)
             if len(self.flight_trail) > 30:
                 self.flight_trail.pop(0)
             if p >= 1:
                 self.resolve()
+        elif self.phase == "impact":
+            self.impact_elapsed += dt
+            if self.impact_elapsed >= 0.90:
+                self.phase = "reveal"
+                self.reveal_elapsed = 0.0
         elif self.phase == "reveal":
             self.reveal_elapsed += dt
             if self.reveal_elapsed >= 1.75:
-                if self.lives <= 0:
+                if self.lives <= 0 or self.deck.complete:
                     self.end_run()
                 else:
                     self.start_shop()
+        if self.phase == "end":
+            self.victory_age += dt
+        for effect in self.hit_effects:
+            effect.age += dt
+        self.hit_effects = [effect for effect in self.hit_effects if effect.age < effect.duration]
         next_particles = []
         for p in self.particles:
             p.life -= dt
@@ -680,10 +763,11 @@ class Game:
             draw_symbol(self.canvas, 169 + n * 30, 670, 10, "heart", col)
         self.text(self.canvas, "SERIE", 410, 672, 14, MUTED, True)
         self.text(self.canvas, str(self.streak), 481, 673, 20, GOLD, True)
-        self.text(self.canvas, "TREFFER", 564, 672, 14, MUTED, True)
-        self.text(self.canvas, str(self.correct_count), 663, 673, 20, CYAN, True)
+        self.text(self.canvas, "GELERNT", 555, 672, 14, MUTED, True)
+        self.text(self.canvas, f"{self.correct_count}/{len(VERBS)}", 675, 673, 20, CYAN, True)
+        self.text(self.canvas, f"FEHLER: {self.deck.mistakes}", 758, 672, 13, RED, True)
         gear = self.active_round.theme.title if self.active_round else "Standardmunition"
-        self.text(self.canvas, gear.upper()[:25], 1162, 674, 13, WHITE, True, align="right")
+        self.text(self.canvas, gear.upper()[:19], 1162, 674, 13, WHITE, True, align="right")
 
     def draw_dummy(self, index: int, title: str, popup: float = 1.0,
                    state: str = "neutral") -> None:
@@ -730,7 +814,7 @@ class Game:
         if timer_ratio > .002:
             rounded(self.canvas, (401, 306, max(1, int(478 * timer_ratio)), 11), timer_col, radius=6)
         self.text(self.canvas, f"{self.time_left:0.1f}s", 894, 310, 17, timer_col, True)
-        popup = 1 - (1 - min(1, self.question_age / .46)) ** 3
+        popup = self.popup_progress()
         for i, word in enumerate(self.options):
             self.draw_dummy(i, word, popup)
         self.draw_hearts()
@@ -749,22 +833,11 @@ class Game:
         if self.phase != "flight" or self.outcome == "timeout":
             return
         u = self.active_round
-        theme = u.theme if u else THEMES[0]
-        tier = u.tier if u else 0
-        trail_color = theme.accent
-        for i, (x, y) in enumerate(self.flight_trail):
-            radius = 2 + int((i / max(1, len(self.flight_trail))) * 4 + tier / 4)
-            if i % (2 if tier >= 3 else 4) == 0:
-                pygame.draw.circle(self.canvas, mix(trail_color, BG, .5 - .3 * i / max(1, len(self.flight_trail))),
-                                   point(x, y), radius)
-        if self.flight_trail:
-            x, y = self.flight_trail[-1]
-            draw_symbol(self.canvas, x, y, 16 + min(tier, 8), theme.projectile, theme.color, theme.accent)
-            if tier >= 6:
-                for j in range(2 + tier // 3):
-                    a = self.time_elapsed * 18 + math.tau * j / (2 + tier // 3)
-                    draw_symbol(self.canvas, x + math.cos(a) * 28, y + math.sin(a) * 28,
-                                4, theme.projectile, theme.accent)
+        kind = u.theme.projectile if u else "chalk"
+        draw_weapon_trail(self.canvas, kind, u.tier if u else 0,
+                          self.shot_from, self.shot_to,
+                          min(1.0, self.flight_time / self.flight_seconds),
+                          self.time_elapsed, draw_symbol)
 
     def draw_particles(self) -> None:
         for r in self.rings:
@@ -776,6 +849,10 @@ class Game:
             t = p.life / p.lifespan
             color = mix(BG, p.color, max(.10, t))
             draw_symbol(self.canvas, p.x, p.y, max(3, p.size * (.45 + t * .7)), p.kind, color)
+        for e in self.hit_effects:
+            if e.age >= 0:
+                draw_weapon_impact(self.canvas, e.kind, e.x, e.y, e.age,
+                                   e.tier, draw_symbol, e.duration)
 
     def draw_reveal(self) -> None:
         self.header()
@@ -821,12 +898,12 @@ class Game:
                   17, WHITE, True, "center")
         self.text(self.canvas, "Treffe in 5 Sekunden die richtige Simple-Past-Form.", W // 2, 370,
                   18, MUTED, False, "center")
-        self.text(self.canvas, "28 VERBEN  ·  5 LEBEN  ·  280 UPGRADES  ·  NUR MAUS", W // 2, 427,
+        self.text(self.canvas, "28 VERBEN RICHTIG PRO RUN  ·  5 LEBEN  ·  280 UPGRADES", W // 2, 427,
                   15, GOLD, True, "center")
         self.text(self.canvas, "Münzen und gekaufte Munition bleiben gespeichert.", W // 2, 465,
                   15, MUTED, False, "center")
         self.button(pygame.Rect(452, 510, 376, 69), "JETZT SPIELEN", CYAN, size=23)
-        self.text(self.canvas, f"REKORD: {self.progress['best']} TREFFER", W // 2, 642,
+        self.text(self.canvas, f"REKORD: {self.progress['best']}/{len(VERBS)}  ·  ABSCHLÜSSE: {self.progress['completions']}", W // 2, 642,
                   15, GOLD, True, "center")
 
     def shop_card(self, upgrade: Upgrade, rect: pygame.Rect) -> None:
@@ -837,9 +914,18 @@ class Game:
         border = GREEN if equipped else CYAN if owned else GOLD if affordable else (66, 87, 105)
         rounded(self.canvas, rect.move(0, 5), (8, 15, 29), radius=16)
         rounded(self.canvas, rect, mix((31, 45, 68), (49, 64, 84), .35 if hover else 0), border, 16, 2)
-        pygame.draw.circle(self.canvas, (22, 32, 54), (rect.x + 44, rect.y + 46), 30)
+        pygame.draw.circle(self.canvas, (22, 32, 54), (rect.x + 44, rect.y + 46), 32)
         theme = upgrade.theme
-        draw_symbol(self.canvas, rect.x + 44, rect.y + 46, 18, theme.projectile, theme.color, theme.accent)
+        # Animate each shop thumbnail, so projectile families look different
+        # BEFORE the player buys them. Clip effects inside the preview window.
+        clip = self.canvas.get_clip()
+        self.canvas.set_clip(pygame.Rect(rect.x + 6, rect.y + 8, 76, 78))
+        preview_age = (self.time_elapsed * .60 + (upgrade.theme_index % 4) * .17) % 1.05
+        draw_weapon_impact(self.canvas, theme.projectile, rect.x + 44, rect.y + 46,
+                           preview_age, min(4, upgrade.tier), draw_symbol)
+        self.canvas.set_clip(clip)
+        draw_symbol(self.canvas, rect.x + 44, rect.y + 46, 19,
+                    theme.projectile, theme.color, theme.accent)
         title = theme.title.upper()
         textsize = 17 if len(title) < 17 else 14
         self.text(self.canvas, title, rect.x + 83, rect.y + 33, textsize, WHITE, True)
@@ -858,7 +944,7 @@ class Game:
     def draw_shop(self) -> None:
         self.header()
         self.text(self.canvas, "MUNITIONS-WERKSTATT", 62, 120, 30, WHITE, True)
-        self.text(self.canvas, f"{len(self.owned)} / {len(UPGRADES)} DAUERHAFT FREIGESCHALTET", 1196, 119,
+        self.text(self.canvas, f"{self.correct_count}/{len(VERBS)} GELERNT  ·  {len(self.owned)}/{len(UPGRADES)} UPGRADES", 1196, 119,
                   15, MUTED, True, "right")
         rounded(self.canvas, (60, 145, 1160, 79), (42, 60, 76), (98, 142, 161), 15)
         draw_symbol(self.canvas, 103, 184, 24, self.trial_candidate.theme.projectile,
@@ -888,16 +974,43 @@ class Game:
 
     def draw_end(self) -> None:
         self.header()
-        rounded(self.canvas, (256, 174, 768, 492), (21, 34, 56), (106, 135, 158), 24, 3)
-        self.text(self.canvas, "RUNDE BEENDET", W // 2, 244, 42, GOLD, True, "center", True)
-        self.text(self.canvas, "Die nächste Runde kann noch besser werden.", W // 2, 307,
-                  17, MUTED, False, "center")
-        self.text(self.canvas, str(self.correct_count), 485, 391, 70, CYAN, True, "center", True)
-        self.text(self.canvas, "RICHTIGE TREFFER", 485, 451, 15, MUTED, True, "center")
-        self.text(self.canvas, str(self.progress["best"]), 800, 391, 70, GREEN, True, "center", True)
-        self.text(self.canvas, "PERSÖNLICHER REKORD", 800, 451, 15, MUTED, True, "center")
-        self.button(pygame.Rect(449, 511, 382, 64), "NOCHMAL SPIELEN", CYAN, size=22)
-        self.button(pygame.Rect(501, 591, 278, 52), "BEENDEN", CYAN, secondary=True, size=17)
+        if self.completed:
+            # A victory lap of falling coins and stars, independent of selected ammo.
+            for i in range(47):
+                px = 59 + (i * 179) % 1175
+                py = ((i * 83 + self.victory_age * (40 + i % 6 * 9)) % 650) + 15
+                draw_symbol(self.canvas, px, py, 4 + i % 7,
+                            "gold" if i % 3 == 0 else "star",
+                            GOLD if i % 3 == 0 else (118, 226, 238), WHITE)
+        rounded(self.canvas, (241, 158, 798, 514), (21, 34, 56),
+                GOLD if self.completed else (106, 135, 158), 24, 3)
+        if self.completed:
+            self.text(self.canvas, "ALLE 28 VERBEN GESCHAFFT!", W // 2, 224,
+                      34, GOLD, True, "center", True)
+            self.text(self.canvas, "Jedes Verb einmal richtig – gut gemacht!", W // 2, 280,
+                      18, GREEN, True, "center")
+        else:
+            self.text(self.canvas, "RUNDE BEENDET", W // 2, 224,
+                      42, RED, True, "center", True)
+            self.text(self.canvas, "Keine Leben mehr. Versuch die übrigen Verben erneut!", W // 2, 280,
+                      16, MUTED, False, "center")
+        self.text(self.canvas, f"{self.correct_count}/{len(VERBS)}", 474, 366,
+                  58, CYAN, True, "center", True)
+        self.text(self.canvas, "VERBEN BEHERRSCHT", 474, 411, 14, MUTED, True, "center")
+        self.text(self.canvas, str(self.deck.mistakes), 804, 366,
+                  58, RED if self.deck.mistakes else GREEN, True, "center", True)
+        self.text(self.canvas, "FEHLER IN DIESEM RUN", 804, 411, 14, MUTED, True, "center")
+        if self.completed:
+            rounded(self.canvas, (358, 437, 564, 67), (64, 73, 58), GOLD, 15, 2)
+            self.text(self.canvas, f"+{self.bonus_awarded:,} BONUS-MÜNZEN".replace(",", "."),
+                      W // 2, 470, 27, GOLD, True, "center")
+        else:
+            self.text(self.canvas, "ABSCHLUSS-BONUS: ALLE VERBEN RICHTIG LÖSEN",
+                      W // 2, 472, 15, MUTED, True, "center")
+        self.text(self.canvas, f"BESTER RUN: {self.progress['best']}/{len(VERBS)}  ·  ABGESCHLOSSEN: {self.progress['completions']}",
+                  W // 2, 517, 13, MUTED, True, "center")
+        self.button(pygame.Rect(449, 540, 382, 58), "NOCHMAL SPIELEN", CYAN, size=21)
+        self.button(pygame.Rect(501, 611, 278, 44), "BEENDEN", CYAN, secondary=True, size=16)
 
     def render(self) -> None:
         self.draw_background()
@@ -908,13 +1021,25 @@ class Game:
         elif self.phase == "flight":
             self.draw_play()
             self.draw_bullet()
+        elif self.phase == "impact":
+            self.draw_play()
+            if self.outcome == "correct":
+                kind = self.active_round.theme.projectile if self.active_round else "chalk"
+                effect_words = {"football": "TOOOOR!", "explosion": "KABOOM!",
+                                "firework": "FEUERWERK!", "gold": "JACKPOT!",
+                                "laser": "ZAPP!", "lightning": "BLITZ!"}
+                if kind in effect_words:
+                    self.text(self.canvas, effect_words[kind], 640, 346, 40, GOLD,
+                              True, "center", True)
         elif self.phase == "reveal":
+            self.draw_particles()
             self.draw_reveal()
         elif self.phase == "shop":
             self.draw_shop()
         elif self.phase == "end":
             self.draw_end()
-        self.draw_particles()
+        if self.phase != "reveal":
+            self.draw_particles()
         if self.flash > 0:
             layer = pygame.Surface((W, H), pygame.SRCALPHA)
             layer.fill((250, 247, 213, int(self.flash * 75)))
