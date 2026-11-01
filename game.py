@@ -19,11 +19,12 @@ import pygame
 
 from upgrades import (
     PAGE_SIZE, THEMES, UPGRADES, UPGRADE_BY_ID, Upgrade,
-    recommended_page, reward, shop_page, completion_bonus,
+    reward, completion_bonus,
 )
 from vocabulary import VERBS, Verb, MasteryDeck
-from weapon_fx import WEAPONS, flight_point
+from weapon_fx import WEAPONS, flight_point, flight_duration
 from weapon_visuals import trail as draw_weapon_trail, impact as draw_weapon_impact
+from weapon_choreography import draw_flight_choreography
 
 W, H = 1280, 720
 FPS = 60
@@ -354,6 +355,7 @@ class Game:
         self.trial_pending: str | None = None
         self.trial_candidate: Upgrade = UPGRADES[-1]
         self.page = 0
+        self.shop_view = "all"
         self.toast = ""
         self.toast_age = 0.0
         self.particles: list[Particle] = []
@@ -365,6 +367,9 @@ class Game:
         self.coins = self.progress["coins"]
         self.owned: set[str] = set(self.progress["owned"])
         self.equipped: str | None = self.progress["equipped"]
+        self.shop_view = self.progress["shop_view"]
+        self.page = self.progress["owned_page"] if self.shop_view == "owned" else self.progress["shop_page"]
+        self.clamp_shop_page()
         self.sound_on = self.progress["sound_on"]
 
     def locate_fonts(self) -> dict[str, str | None]:
@@ -491,7 +496,8 @@ class Game:
     def load_progress(self) -> dict:
         default = {"coins": 0, "owned": [], "equipped": None, "best": 0,
                    "total_hits": 0, "runs": 0, "completions": 0,
-                   "best_mistakes": None, "sound_on": True}
+                   "best_mistakes": None, "sound_on": True,
+                   "shop_page": 0, "owned_page": 0, "shop_view": "all"}
         path = save_folder() / "progress.json"
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
@@ -510,13 +516,19 @@ class Game:
             if values["equipped"] not in values["owned"]:
                 values["equipped"] = None
             values["sound_on"] = bool(values["sound_on"])
+            max_page = max(0, (len(UPGRADES) - 1) // PAGE_SIZE)
+            for key in ("shop_page", "owned_page"):
+                values[key] = max(0, min(max_page, int(values[key])))
+            values["shop_view"] = values["shop_view"] if values["shop_view"] in ("all", "owned") else "all"
             return values
         except (OSError, ValueError, TypeError, OverflowError):
             return default
 
     def save_progress(self) -> None:
+        current_page = "owned_page" if self.shop_view == "owned" else "shop_page"
+        self.progress[current_page] = self.page
         self.progress.update(coins=self.coins, owned=sorted(self.owned), equipped=self.equipped,
-                             sound_on=self.sound_on)
+                             shop_view=self.shop_view, sound_on=self.sound_on)
         folder = save_folder()
         try:
             folder.mkdir(parents=True, exist_ok=True)
@@ -562,12 +574,46 @@ class Game:
         self.questions += 1
         self.sound("pop")
 
+    def shop_items(self) -> tuple[Upgrade, ...]:
+        """Sorted by level, with a separate view of everything already owned."""
+        if self.shop_view == "owned":
+            return tuple(upgrade for upgrade in UPGRADES if upgrade.id in self.owned)
+        return UPGRADES
+
+    def shop_page_items(self) -> tuple[Upgrade, ...]:
+        items = self.shop_items()
+        return items[self.page * PAGE_SIZE:(self.page + 1) * PAGE_SIZE]
+
+    def shop_last_page(self) -> int:
+        return max(0, (len(self.shop_items()) - 1) // PAGE_SIZE)
+
+    def clamp_shop_page(self) -> None:
+        self.page = max(0, min(self.page, self.shop_last_page()))
+
+    def set_shop_view(self, view: str) -> None:
+        if view not in ("all", "owned"):
+            raise ValueError("shop view must be 'all' or 'owned'")
+        self.progress["owned_page" if self.shop_view == "owned" else "shop_page"] = self.page
+        self.shop_view = view
+        self.page = self.progress.get("owned_page" if view == "owned" else "shop_page", 0)
+        self.clamp_shop_page()
+        self.save_progress()
+        self.sound("trial")
+
+    def change_shop_page(self, delta: int) -> None:
+        self.page += delta
+        self.clamp_shop_page()
+        self.save_progress()
+        self.sound("trial")
+
     def start_shop(self) -> None:
         if self.deck.complete or self.lives <= 0:
             self.end_run()
             return
         self.phase = "shop"
-        self.page = recommended_page(self.coins, self.owned)
+        # Do NOT jump to an affordable item: players return to their last page.
+        # New save data begins on page 1 (internal index 0).
+        self.clamp_shop_page()
         self.trial_pending = None
         pool = [u for u in UPGRADES if u.id not in self.owned and u.tier >= 3]
         self.trial_candidate = self.rng.choice(pool or list(UPGRADES))
@@ -605,10 +651,14 @@ class Game:
         self.outcome = "timeout" if timeout else "correct" if target == self.correct_index else "wrong"
         self.winnings = reward(self.streak + 1, self.time_left) if self.outcome == "correct" else 0
         kind = self.active_round.theme.projectile if self.active_round else "chalk"
-        self.flight_seconds = WEAPONS[kind].travel * (
-            .86 if self.active_round and self.active_round.tier >= 2 else 1.0)
+        tier = self.active_round.tier if self.active_round else 1
+        self.flight_seconds = flight_duration(kind, tier)
+        # On click, the reaction timer is frozen. Flight/impact/reveal never
+        # decrement this value; a 2.3 second cinematic rocket remains fair.
+        self.shot_time_left = self.time_left
         self.flight_time = 0.0
-        self.shot_from = (W / 2, H - 13)
+        # Launch from the stage, not underneath the bottom HUD.
+        self.shot_from = (W / 2, 588)
         self.shot_to = clicked_at or (640, 472)
         self.flight_trail = []
         self.phase = "flight"
@@ -680,17 +730,20 @@ class Game:
     def buy_or_equip(self, upgrade: Upgrade) -> None:
         if upgrade.id in self.owned:
             self.equipped = upgrade.id
+            self.trial_pending = None  # selecting a purchased weapon beats a preview shot
             self.sound("trial")
             self.flash_message("AUSGERÜSTET: " + upgrade.theme.title)
         elif self.coins >= upgrade.cost:
             self.coins -= upgrade.cost
             self.owned.add(upgrade.id)
             self.equipped = upgrade.id
+            self.trial_pending = None
             self.sound("buy")
             self.flash_message("GEKAUFT & AUSGERÜSTET: " + upgrade.theme.title)
         else:
             self.sound("miss")
             self.flash_message(f"DIR FEHLEN {upgrade.cost - self.coins} MÜNZEN")
+        self.clamp_shop_page()
         self.save_progress()
 
     def trial(self) -> None:
@@ -745,13 +798,15 @@ class Game:
                 self.sound("trial")
                 self.start_question()
             elif pygame.Rect(46, 645, 52, 46).collidepoint(x, y):
-                self.page = max(0, self.page - 1)
-                self.sound("trial")
+                self.change_shop_page(-1)
             elif pygame.Rect(200, 645, 52, 46).collidepoint(x, y):
-                self.page = min((len(UPGRADES) - 1) // PAGE_SIZE, self.page + 1)
-                self.sound("trial")
+                self.change_shop_page(1)
+            elif pygame.Rect(408, 645, 134, 46).collidepoint(x, y):
+                self.set_shop_view("all")
+            elif pygame.Rect(552, 645, 194, 46).collidepoint(x, y):
+                self.set_shop_view("owned")
             else:
-                for i, upgrade in enumerate(shop_page(self.page)):
+                for i, upgrade in enumerate(self.shop_page_items()):
                     col, row = i % 3, i // 3
                     rect = pygame.Rect(32 + col * 412, 233 + row * 195, 392, 179)
                     if rect.collidepoint(x, y):
@@ -775,7 +830,7 @@ class Game:
             if self.time_left <= 0:
                 self.register_shot(None, timeout=True)
         elif self.phase == "flight":
-            self.question_age += dt
+            # No time_left subtraction after a click; projectile choreography is free.
             self.flight_time += dt
             p = min(1, self.flight_time / self.flight_seconds)
             kind = self.active_round.theme.projectile if self.active_round else "chalk"
@@ -1002,7 +1057,8 @@ class Game:
                             -math.pi / 2 + math.tau * ratio, 7)
         self.text(self.canvas, f"{self.time_left:0.1f}", 899, 164,
                   26, GOLD, True, "center", family="number")
-        self.text(self.canvas, "SEK", 899, 192, 12, MUTED,
+        self.text(self.canvas, "STOP" if self.phase in ("flight", "impact") else "SEK",
+                  899, 192, 12, CYAN if self.phase in ("flight", "impact") else MUTED,
                   False, "center", family="label")
         popup = self.popup_progress()
         for i, word in enumerate(self.options):
@@ -1025,10 +1081,26 @@ class Game:
             return
         u = self.active_round
         kind = u.theme.projectile if u else "chalk"
-        draw_weapon_trail(self.canvas, kind, u.tier if u else 0,
-                          self.shot_from, self.shot_to,
-                          min(1.0, self.flight_time / self.flight_seconds),
-                          self.time_elapsed, draw_symbol)
+        t = min(1.0, self.flight_time / self.flight_seconds)
+        # FX stay inside the stage: never cover the verb, text or shop/HUD.
+        previous_clip = self.canvas.get_clip()
+        self.canvas.set_clip(pygame.Rect(70, 238, 1140, 357))
+        try:
+            draw_weapon_trail(self.canvas, kind, u.tier if u else 0,
+                              self.shot_from, self.shot_to,
+                              t, self.time_elapsed, draw_symbol)
+            draw_flight_choreography(self.canvas, kind, u.tier if u else 1,
+                                    self.shot_from, self.shot_to,
+                                    t, self.time_elapsed, draw_symbol)
+        finally:
+            self.canvas.set_clip(previous_clip)
+        # Particularly important for the cinematic homing missile.
+        if kind == "rocket" and .27 < t < .57:
+            self.text(self.canvas, "ZIELSUCHE ...", self.shot_to[0], self.shot_to[1] - 57,
+                      15, CYAN, True, "center", family="label", max_width=185)
+        elif kind == "rocket" and t >= .57:
+            self.text(self.canvas, "ZIEL ERFASST", self.shot_to[0], self.shot_to[1] - 57,
+                      15, GREEN, True, "center", family="label", max_width=185)
 
     def draw_particles(self) -> None:
         # Never obscure the header, question, clickable answer plates or HUD.
@@ -1186,23 +1258,37 @@ class Game:
         self.button(pygame.Rect(1034, 158, 198, 56),
                     "AUSGEW\u00c4HLT" if self.trial_pending else "GRATIS TESTEN",
                     CYAN, secondary=bool(self.trial_pending), size=17)
-        for i, upgrade in enumerate(shop_page(self.page)):
+        page_items = self.shop_page_items()
+        for i, upgrade in enumerate(page_items):
             x = 32 + (i % 3) * 412
             y = 233 + (i // 3) * 195
             self.shop_card(upgrade, pygame.Rect(x, y, 392, 179))
+        if not page_items:
+            self.text(self.canvas, "NOCH KEINE WAFFEN GEKAUFT", 640, 351,
+                      30, MUTED, True, "center", family="title", max_width=800)
+            self.text(self.canvas, "Unter ALLE LEVEL kannst du deine erste Munition kaufen.",
+                      640, 409, 16, WHITE, False, "center", family="label")
         draw_panel(self.canvas, (32, 632, 1216, 70), PANEL, (78, 103, 145),
                    cut=10, border_width=1, shadow_offset=1)
-        last = (len(UPGRADES) - 1) // PAGE_SIZE
+        last = self.shop_last_page()
         self.button(pygame.Rect(46, 645, 52, 46), "<", CYAN,
                     secondary=True, size=26, disabled=self.page == 0)
         self.text(self.canvas, f"SEITE {self.page + 1}/{last + 1}", 149, 668,
                   15, WHITE, True, "center", family="number", max_width=95)
         self.button(pygame.Rect(200, 645, 52, 46), ">", CYAN,
                     secondary=True, size=26, disabled=self.page == last)
-        self.text(self.canvas, "Klick: kaufen oder ausr\u00fcsten", 278, 666,
-                  14, MUTED, family="label")
+        self.button(pygame.Rect(408, 645, 134, 46), "ALLE LEVEL", CYAN,
+                    secondary=self.shop_view != "all", size=14)
+        self.button(pygame.Rect(552, 645, 194, 46),
+                    f"GEKAUFT ({len(self.owned)})", GREEN,
+                    secondary=self.shop_view != "owned", size=14)
+        if page_items:
+            low, high = page_items[0].tier, page_items[-1].tier
+            level_label = f"LV {low}" if low == high else f"LV {low}-{high}"
+            self.text(self.canvas, level_label, 823, 665, 14, GOLD,
+                      True, "center", family="number", max_width=108)
         self.button(pygame.Rect(994, 638, 236, 51),
-                    "N\u00c4CHSTE FRAGE  >", CYAN, size=18)
+                    "NÄCHSTE FRAGE  >", CYAN, size=18)
         if self.toast and self.toast_age < 2.4:
             draw_panel(self.canvas, (404, 641, 540, 46), PANEL, GOLD, cut=8,
                        border_width=1, shadow_offset=0)

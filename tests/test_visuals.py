@@ -64,6 +64,8 @@ class VisualTests(unittest.TestCase):
                 game = Game.__new__(Game)  # no sound card or display needed
                 game.rng = random.Random(14)
                 game.coins = 0
+                game.shop_view = "all"
+                game.page = 0
                 game.owned = set()
                 game.equipped = None
                 game.progress = {"runs": 0, "best": 0, "completions": 0,
@@ -102,6 +104,8 @@ class VisualTests(unittest.TestCase):
         game = Game.__new__(Game)
         game.rng = random.Random(10)
         game.coins = 0
+        game.shop_view = "all"
+        game.page = 0
         game.owned = set()
         game.equipped = None
         game.progress = {"runs": 0, "best": 0, "completions": 0,

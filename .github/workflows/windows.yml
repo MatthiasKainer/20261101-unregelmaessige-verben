@@ -9,6 +9,7 @@ on:
       - "upgrades.py"
       - "weapon_fx.py"
       - "weapon_visuals.py"
+      - "weapon_choreography.py"
       - "scripts/**"
       - "requirements.txt"
       - "tests/**"
@@ -36,16 +37,16 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Download three OFL fonts and licenses
         run: python scripts/fetch_fonts.py
-      - name: Test game data and economy
+      - name: Test game data, animation and shop persistence
         run: python -m unittest discover -s tests -v
       - name: Compile sources
-        run: python -m compileall -q game.py vocabulary.py upgrades.py weapon_fx.py weapon_visuals.py scripts
+        run: python -m compileall -q game.py vocabulary.py upgrades.py weapon_fx.py weapon_visuals.py weapon_choreography.py scripts
       - name: Offscreen gameplay smoke test
         env:
           SDL_VIDEODRIVER: dummy
           SDL_AUDIODRIVER: dummy
         run: python game.py --smoke-test
-      - name: Verify UI screenshots and glyph contrast
+      - name: Verify screenshots and weapon animations
         env:
           SDL_VIDEODRIVER: dummy
           SDL_AUDIODRIVER: dummy
@@ -58,4 +59,11 @@ jobs:
           name: IrregularRange-Windows
           path: dist/IrregularRange.exe
           retention-days: 7
+          if-no-files-found: error
+      - name: Upload UI previews (2 days, same job)
+        uses: actions/upload-artifact@v4
+        with:
+          name: IrregularRange-Visual-QA
+          path: visual-preview/*.png
+          retention-days: 2
           if-no-files-found: error

@@ -129,7 +129,9 @@ def trail(surface: pygame.Surface, kind: str, tier: int, start: tuple,
             pygame.draw.circle(surface, fade(color, .60), xy(x, y), rr, 2)
         symbol(surface, x, y, size, kind, color, accent)
     elif kind == "rocket":
-        symbol(surface, x, y, size + 7, kind, color, accent)
+        # The cinematic flight renderer rotates a fully drawn rocket to its
+        # real steering direction. Avoid overlaying a sideways duplicate.
+        pass
     else:
         symbol(surface, x, y, size, kind, color, accent)
     return head
