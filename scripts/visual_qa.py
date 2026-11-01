@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import pygame
-from game import Game, HitEffect, BG, PANEL, WHITE, VERBS, UPGRADES, THEMES, draw_symbol
+from game import Game, BG, PANEL, WHITE, VERBS, UPGRADES, THEMES, draw_symbol
 from weapon_fx import flight_duration
 from weapon_visuals import trail as draw_weapon_trail
 from weapon_choreography import draw_flight_choreography
@@ -38,7 +38,7 @@ def screenshot(game: Game, state: str) -> None:
 def main() -> None:
     # Explicit screenshot states for visual comparison to supplied mockups.
     game = Game()
-    game.sound_on = False
+    game.sound_on = True
     game.mouse = (-99, -99)
     game.time_elapsed = 4.2
     screenshot(game, "menu")
@@ -57,10 +57,14 @@ def main() -> None:
     screenshot(game, "play")
 
     game.phase = "impact"
-    game.hit_effects = [HitEffect("football", 640, 352, 9, .34, 1.05)]
     game.outcome = "correct"
-    screenshot(game, "impact")
+    game.chosen_index = 1
+    game.winnings = 10
+    game.streak = 3
+    game.impact_elapsed = 0.15
+    game.sound_on = True
     game.hit_effects.clear()
+    screenshot(game, "impact")
 
     # The first time a player sees the catalog it must start on level 1.
     rocket = next(u for u in UPGRADES if u.theme.projectile == "rocket" and u.tier == 10)
@@ -83,7 +87,15 @@ def main() -> None:
     game.shop_view = "all"
     game.trial_candidate = next(u for u in UPGRADES if u.theme.projectile == "water" and u.tier == 9)
     game.toast = ""
+    game.sound_on = True
     screenshot(game, "shop")
+
+    # Tier-7 page used by the Munitions-Werkstatt mockup (SEITE 29/47).
+    game.page = 28
+    game.owned = set()
+    game.equipped = None
+    screenshot(game, "shop_tier7")
+    game.page = 0
 
     game.owned = {UPGRADES[3].id, UPGRADES[19].id, rocket.id}
     game.equipped = rocket.id

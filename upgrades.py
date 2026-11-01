@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from effects import EFFECTS
 from vocabulary import VERBS
 
 
@@ -78,12 +79,25 @@ class Upgrade:
     def theme(self) -> Theme:
         return THEMES[self.theme_index]
 
+    @property
+    def effect(self):
+        return EFFECTS[self.theme.projectile]
+
+    @property
+    def effect_line(self) -> str:
+        return self.effect.text(self.tier)
+
+
+def _describe(theme: Theme, tier: int) -> str:
+    effect = EFFECTS[theme.projectile]
+    return f"{theme.flavor}. {LEVELS[tier - 1][1]}. {effect.text(tier)}."
+
 
 UPGRADES: tuple[Upgrade, ...] = tuple(
     Upgrade(
         id=f"{theme_index:02d}-{tier:02d}",
         name=f"{theme.title} · {LEVELS[tier - 1][0]}",
-        description=f"{theme.flavor}. {LEVELS[tier - 1][1]}.",
+        description=_describe(theme, tier),
         theme_index=theme_index,
         tier=tier,
         cost=int(round((12 + theme_index * 5) * (1.7 ** (tier - 1)))),
@@ -114,6 +128,13 @@ def reward(streak: int, seconds_left: float) -> int:
     return 30 + min(max(1, streak), 8) * 4 + int(max(0.0, seconds_left) * 4)
 
 
+def tier_ready(theme_index: int, tier: int, owned: set[str]) -> bool:
+    """Level n can be bought only when level n-1 of the same weapon is owned."""
+    if tier <= 1:
+        return True
+    return f"{theme_index:02d}-{tier - 1:02d}" in owned
+
+
 def validate() -> None:
     assert len(THEMES) == len(VERBS), "Exactly one projectile family per verb"
     assert len(UPGRADES) == len(VERBS) * 10
@@ -122,16 +143,18 @@ def validate() -> None:
     assert all(u.cost > 0 and 1 <= u.tier <= 10 for u in UPGRADES)
     assert all(len({u.cost for u in UPGRADES if u.theme_index == t}) == 10
                for t in range(len(THEMES)))
+    assert set(EFFECTS) == {theme.projectile for theme in THEMES}
+    assert all(u.effect_line for u in UPGRADES)
 
 
 validate()
 
 
-def completion_bonus(mistakes: int) -> int:
+def completion_bonus(mistakes: int, assisted: int = 0) -> int:
     """Bonus for finishing every verb; awarded once on a successful run.
 
-    A perfect 28/28 earns 1800 coins; each wrong answer or timeout costs
-    300 bonus coins. Five mistakes exhaust the initial lives, so only runs
-    with 0-4 mistakes are normally eligible for a completion bonus.
+    A perfect 28/28 earns 1800 coins. Each wrong answer or timeout costs
+    300 bonus coins, each assisted answer costs 50. Five mistakes exhaust
+    the initial lives, so only runs with 0-4 life-losses normally finish.
     """
-    return max(0, 1800 - 300 * max(0, int(mistakes)))
+    return max(0, 1800 - 300 * max(0, int(mistakes)) - 50 * max(0, int(assisted)))

@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "game.py"
+      - "effects.py"
       - "vocabulary.py"
       - "upgrades.py"
       - "weapon_fx.py"
@@ -40,7 +41,7 @@ jobs:
       - name: Test game data, animation and shop persistence
         run: python -m unittest discover -s tests -v
       - name: Compile sources
-        run: python -m compileall -q game.py vocabulary.py upgrades.py weapon_fx.py weapon_visuals.py weapon_choreography.py scripts
+        run: python -m compileall -q game.py effects.py vocabulary.py upgrades.py weapon_fx.py weapon_visuals.py weapon_choreography.py scripts
       - name: Offscreen gameplay smoke test
         env:
           SDL_VIDEODRIVER: dummy

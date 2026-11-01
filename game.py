@@ -17,11 +17,23 @@ from dataclasses import dataclass
 
 import pygame
 
+from effects import (
+    BOSS_MARKS, BOSS_STAGE_FLOOR, PRESSURE, EFFECTS,
+    boss_seconds, compute_reward, consume_timer,
+    deposit_time_bank, emp_interval, fever_duration, first_miss_action,
+    heal_lives, hint_assists, hint_delay, hitbox_scale, is_revenge,
+    milestone_crossed, paint_cost, pick_elimination, pressure_level,
+    protection, question_seconds, shield_regen_step, streak_after_fail,
+    streak_after_success, target_speed_scale,
+)
 from upgrades import (
     PAGE_SIZE, THEMES, UPGRADES, UPGRADE_BY_ID, Upgrade,
-    reward, completion_bonus,
+    completion_bonus, tier_ready,
 )
-from vocabulary import VERBS, Verb, MasteryDeck
+from vocabulary import (
+    PATTERN_BLURB, VERBS, Verb, MasteryDeck,
+    bridge_text, pick_review_verb, sanitize_verb_stats, touch_stat,
+)
 from weapon_fx import WEAPONS, flight_point, flight_duration
 from weapon_visuals import trail as draw_weapon_trail, impact as draw_weapon_impact
 from weapon_choreography import draw_flight_choreography
@@ -31,21 +43,25 @@ FPS = 60
 QUESTION_SECONDS = 5.0
 STARTING_LIVES = 5
 
-BG = (6, 9, 20)
-PANEL = (18, 26, 54)
+BG = (6, 9, 20)             # #060914
+BG_DEEP = (11, 17, 36)       # #0B1124
+PANEL = (18, 26, 54)         # #121A36
 PANEL_DARK = (11, 18, 39)
-WHITE = (241, 246, 255)
-MUTED = (167, 178, 207)
-CYAN = (34, 230, 255)
-GOLD = (255, 197, 61)
-GREEN = (182, 255, 59)
-RED = (255, 93, 125)
-ORANGE = (255, 122, 26)
-BLUE = (61, 139, 255)
-VIOLET = (181, 77, 255)
-AMBER = (255, 176, 32)
-RARITY_COLORS = (MUTED, BLUE, VIOLET, AMBER)
-RARITY_NAMES = ("GEW\u00d6HNLICH", "SELTEN", "EPISCH", "LEGEND\u00c4R")
+WHITE = (238, 243, 255)      # #EEF3FF
+MUTED = (151, 163, 201)      # #97A3C9
+CYAN = (34, 230, 255)        # #22E6FF
+MAGENTA = (255, 46, 136)     # #FF2E88
+GOLD = (255, 197, 61)        # #FFC53D
+GREEN = (182, 255, 59)       # #B6FF3B
+RED = (255, 77, 94)          # #FF4D5E
+ORANGE = (255, 122, 26)      # #FF7A1A
+BLUE = (61, 139, 255)        # #3D8BFF
+VIOLET = (181, 77, 255)      # #B54DFF
+AMBER = (255, 176, 32)       # #FFB020
+COMMON = (167, 178, 207)     # #A7B2CF
+RARITY_COLORS = (COMMON, BLUE, VIOLET, AMBER)
+RARITY_NAMES = ("GEWÖHNLICH", "SELTEN", "EPISCH", "LEGENDÄR")
+PRESSURE_LABELS = {1: "TRAINING", 2: "BEWEGUNG", 3: "FALLEN", 4: "FINALE"}
 
 
 @dataclass
@@ -82,6 +98,17 @@ class Ring:
     radius: float
     color: tuple[int, int, int]
     width: int = 3
+
+
+@dataclass
+class BossRound:
+    verb: Verb
+    mark: int
+    stage: int = 0
+    retries: int = 0
+    failed: bool = False
+    parts_ok: int = 0
+    time_left: float = 9.0
 
 
 def clamp(v: float, low: float, high: float) -> float:
@@ -132,12 +159,26 @@ def glow_circle(surface: pygame.Surface, center: tuple[int, int], radius: int,
 
 def glow_text(surface: pygame.Surface, img: pygame.Surface, rect: pygame.Rect,
               color: tuple[int, int, int], passes: int = 4) -> None:
-    """Glyph-shaped glow with alpha, not a full-screen additive surface."""
+    """Glyph-shaped glow. Additive blit of an opaque RGB copy, never a full-screen slab."""
     for d in range(passes, 0, -1):
-        halo = img.copy()
-        halo.set_alpha(max(8, 27 - d * 5))
+        halo = pygame.Surface(img.get_size())
+        halo.fill((0, 0, 0))
+        tinted = img.copy()
+        tinted.fill(color, special_flags=pygame.BLEND_RGB_MULT)
+        halo.blit(tinted, (0, 0))
+        dim = max(18, 70 - d * 14)
+        halo.fill((dim, dim, dim), special_flags=pygame.BLEND_RGB_MULT)
         for dx, dy in ((-d, 0), (d, 0), (0, -d), (0, d)):
-            surface.blit(halo, rect.move(dx, dy))
+            surface.blit(halo, rect.move(dx, dy), special_flags=pygame.BLEND_ADD)
+
+
+def additive_stamp(surface: pygame.Surface, size: tuple[int, int],
+                   pos: tuple[int, int], draw) -> None:
+    """Draw into a black RGB buffer and add it. Black contributes nothing."""
+    layer = pygame.Surface(size)
+    layer.fill((0, 0, 0))
+    draw(layer)
+    surface.blit(layer, pos, special_flags=pygame.BLEND_ADD)
 
 
 def draw_panel(surface: pygame.Surface, rect: pygame.Rect | tuple[int, int, int, int],
@@ -371,6 +412,8 @@ class Game:
         self.page = self.progress["owned_page"] if self.shop_view == "owned" else self.progress["shop_page"]
         self.clamp_shop_page()
         self.sound_on = self.progress["sound_on"]
+        self.verb_stats = dict(self.progress.get("verb_stats") or {})
+        self._boot_combat_defaults()
 
     def locate_fonts(self) -> dict[str, str | None]:
         # The GitHub Actions build bundles the three SIL-OFL fonts.
@@ -387,14 +430,19 @@ class Game:
             return None
         return {
             "title": match(("RussoOne-Regular.ttf",), ("russo one", "dejavusans", "segoe ui", "arial")),
-            "label": match(("ChakraPetch-Regular.ttf",), ("chakra petch", "segoe ui", "arial")),
-            "number": match(("Orbitron-Regular.ttf",), ("orbitron", "consolas", "dejavusans", "arial")),
+            "label": match(("ChakraPetch-SemiBold.ttf", "ChakraPetch-Regular.ttf"),
+                           ("chakra petch", "segoe ui", "arial")),
+            "label_bold": match(("ChakraPetch-Bold.ttf", "ChakraPetch-SemiBold.ttf"),
+                                ("chakra petch", "segoe ui", "arial")),
+            "number": match(("Orbitron-Black.ttf", "Orbitron-Regular.ttf"),
+                            ("orbitron", "consolas", "dejavusans", "arial")),
         }
 
     def font(self, size: int, bold: bool = False, family: str = "label") -> pygame.font.Font:
         key = (family, size, bold)
         if key not in self.fonts:
-            source = self.font_sources.get(family)
+            source_family = "label_bold" if bold and family == "label" else family
+            source = self.font_sources.get(source_family) or self.font_sources.get(family)
             if source:
                 font = pygame.font.Font(source, max(8, size))
             else:
@@ -439,12 +487,8 @@ class Game:
     def make_gradient(self) -> pygame.Surface:
         gradient = pygame.Surface((W, H))
         for y in range(H):
-            # Restrained top-right teal rather than the saturated gradients of v3.
             t = y / H
-            pygame.draw.line(gradient, mix(BG, (10, 16, 33), t), (0, y), (W, y))
-        # Thin horizontal scanlines, barely visible at native resolution.
-        for y in range(0, H, 4):
-            pygame.draw.line(gradient, (11, 18, 36), (0, y), (W, y), 1)
+            pygame.draw.line(gradient, mix(BG, BG_DEEP, t), (0, y), (W, y))
         return gradient
 
 
@@ -497,7 +541,8 @@ class Game:
         default = {"coins": 0, "owned": [], "equipped": None, "best": 0,
                    "total_hits": 0, "runs": 0, "completions": 0,
                    "best_mistakes": None, "sound_on": True,
-                   "shop_page": 0, "owned_page": 0, "shop_view": "all"}
+                   "shop_page": 0, "owned_page": 0, "shop_view": "all",
+                   "verb_stats": {}}
         path = save_folder() / "progress.json"
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
@@ -520,6 +565,7 @@ class Game:
             for key in ("shop_page", "owned_page"):
                 values[key] = max(0, min(max_page, int(values[key])))
             values["shop_view"] = values["shop_view"] if values["shop_view"] in ("all", "owned") else "all"
+            values["verb_stats"] = sanitize_verb_stats(values.get("verb_stats"))
             return values
         except (OSError, ValueError, TypeError, OverflowError):
             return default
@@ -528,7 +574,8 @@ class Game:
         current_page = "owned_page" if self.shop_view == "owned" else "shop_page"
         self.progress[current_page] = self.page
         self.progress.update(coins=self.coins, owned=sorted(self.owned), equipped=self.equipped,
-                             shop_view=self.shop_view, sound_on=self.sound_on)
+                             shop_view=self.shop_view, sound_on=self.sound_on,
+                             verb_stats=getattr(self, "verb_stats", {}))
         folder = save_folder()
         try:
             folder.mkdir(parents=True, exist_ok=True)
@@ -538,8 +585,221 @@ class Game:
         except OSError:
             pass  # Don't break the game on protected PCs.
 
+    def _boot_combat_defaults(self) -> None:
+        """Per-run combat state. Safe to call before the first question."""
+        self.mode = "normal"
+        self.time_budget = QUESTION_SECONDS
+        self.slot_x = [330.0, 640.0, 950.0]
+        self.target_w = 240
+        self.motion = 0.0
+        self.eliminated: set[int] = set()
+        self.elim_style = ""
+        self.hint_visible = False
+        self.assisted = False
+        self.assisted_shot = False
+        self.rebound_used = False
+        self.life_note = ""
+        self.paint_used = False
+        self.center_dist = 999.0
+        self.shot_age = 0.0
+        self.swapped = False
+        self.do_swap = False
+        self.swap_pair = (0, 2)
+        self.pressure_band = 1
+        self.pressure_suppressed = False
+        self.banner = ""
+        self.banner_age = 99.0
+        self.prompt = ""
+        self.max_lives = STARTING_LIVES
+        self.help_uses: dict[str, int] = {}
+        self.time_bank = 0.0
+        self.fever_left = 0
+        self.fever_active = False
+        self.charges = 0
+        self.guard_key: str | None = None
+        self.guard_tier = 0
+        self.shield = 0
+        self.shield_max = 0
+        self.shield_progress = 0
+        self.shield_regen = 8
+        self.shield_inited = False
+        self.emp_count = 0
+        self.boss: BossRound | None = None
+        self.boss_queued: int | None = None
+        self.bosses_done: set[int] = set()
+        self.bonus_queued: Verb | None = None
+        if not hasattr(self, "verb_stats") or self.verb_stats is None:
+            self.verb_stats = {}
+
+    def active_fx(self):
+        upgrade = getattr(self, "active_round", None)
+        if not upgrade:
+            return None, 1
+        return EFFECTS.get(upgrade.theme.projectile), upgrade.tier
+
+    def _equip_active(self) -> None:
+        upgrade_id = self.trial_pending or self.equipped
+        self.active_round = UPGRADE_BY_ID.get(upgrade_id) if upgrade_id else None
+        self.trial_pending = None
+
+    def _layout_targets(self, count: int) -> None:
+        if count >= 4:
+            self.slot_x = [176.0, 492.0, 808.0, 1104.0]
+            self.target_w = 196
+        else:
+            self.slot_x = [330.0, 640.0, 950.0]
+            self.target_w = 240
+
+    def _sync_resources(self, fx, tier: int) -> None:
+        if fx and fx.key in ("rebound", "quench"):
+            if self.guard_key != fx.key:
+                self.charges = fx.charges_at(tier)
+                self.guard_key = fx.key
+                self.guard_tier = tier
+            elif tier > self.guard_tier:
+                self.charges += max(0, fx.charges_at(tier) - fx.charges_at(self.guard_tier))
+                self.guard_tier = tier
+        if fx and fx.key == "shield":
+            self.shield_max = int(fx.value_b(tier))
+            self.shield_regen = shield_regen_step(fx, tier)
+            if not self.shield_inited:
+                self.shield = self.shield_max
+                self.shield_inited = True
+            self.shield = min(self.shield_max, self.shield)
+        if fx and fx.key == "heal":
+            self.max_lives = int(fx.value_b(tier))
+        elif self.max_lives != STARTING_LIVES:
+            self.max_lives = STARTING_LIVES
+            self.lives = min(self.lives, self.max_lives)
+
+    def _maybe_hint(self) -> None:
+        if self.hint_visible or self.mode == "bonus":
+            return
+        if self.help_uses.get(self.verb.infinitive, 0) >= 2:
+            return
+        fx, tier = self.active_fx()
+        delay = hint_delay(fx, tier, boss=self.mode == "boss")
+        if delay is None or self.question_age < delay:
+            return
+        self.hint_visible = True
+        if fx and fx.key == "fifty_fifty":
+            try:
+                idx = pick_elimination(self.correct_index, len(self.options), self.rng, self.eliminated)
+            except RuntimeError:
+                return
+            self.eliminated.add(idx)
+            self.elim_style = "ink"
+
+    def _drop_fourth(self) -> None:
+        if len(self.options) < 4 or self.mode != "normal":
+            self.motion = 0.0
+            return
+        idx = None
+        for i, word in enumerate(self.options):
+            if i != self.correct_index and word == self.verb.distractor_c:
+                idx = i
+                break
+        if idx is None:
+            wrong = [i for i in range(len(self.options)) if i != self.correct_index]
+            idx = wrong[-1]
+        self.options = tuple(word for i, word in enumerate(self.options) if i != idx)
+        self.correct_index = self.options.index(self.verb.simple_past)
+        self.eliminated = set()
+        self.motion = 0.0
+        self.do_swap = False
+        self._layout_targets(3)
+
+    def _begin_round(self) -> None:
+        if self.mode == "normal":
+            self._equip_active()
+        fx, tier = self.active_fx()
+        self.fever_active = False
+        if self.mode == "normal" and self.fever_left > 0:
+            self.fever_active = True
+            self.fever_left -= 1
+        self._sync_resources(fx, tier)
+        suppressed = False
+        if fx and fx.key == "emp" and self.mode == "normal":
+            interval = emp_interval(fx, tier)
+            self.emp_count += 1
+            if self.emp_count >= interval:
+                suppressed = True
+                self.emp_count = 0
+        self.pressure_suppressed = suppressed
+        learned = self.correct_count
+        band = 1 if suppressed or self.mode != "normal" else pressure_level(learned)
+        if self.mode == "normal" and band != getattr(self, "pressure_band", 1):
+            self.banner = f"LEVEL {band}: {PRESSURE_LABELS[band]}!"
+            self.banner_age = 0.0
+            self.pressure_band = band
+        elif self.mode == "normal":
+            self.pressure_band = band
+        spec = PRESSURE[1 if self.mode != "normal" else band]
+        self.chosen_index = None
+        self.question_age = 0.0
+        self.shake = 0.0
+        self.flight_trail.clear()
+        self.eliminated = set()
+        self.elim_style = ""
+        self.hint_visible = False
+        self.assisted = False
+        self.assisted_shot = False
+        self.rebound_used = False
+        self.life_note = ""
+        self.paint_used = False
+        self.center_dist = 999.0
+        self.shot_age = 0.0
+        self.swapped = False
+        self.outcome = ""
+        self.winnings = 0
+        if self.mode == "bonus":
+            self.options = self.verb.options(self.rng, 3)
+            self.correct_index = self.options.index(self.verb.simple_past)
+            self.time_left = 3.0
+            self.time_budget = 3.0
+            self.motion = 0.0
+            self.do_swap = False
+            self.prompt = "AUFFRISCHUNG"
+            self._layout_targets(3)
+        elif self.mode == "boss" and self.boss is not None:
+            stage = "past" if self.boss.stage == 0 else "participle"
+            self.options = self.verb.boss_options(self.rng, stage)
+            answer = self.verb.simple_past if stage == "past" else self.verb.past_participle
+            self.correct_index = self.options.index(answer)
+            if self.boss.stage == 0:
+                self.boss.time_left = boss_seconds(fx, tier)
+            else:
+                self.boss.time_left = max(BOSS_STAGE_FLOOR, self.boss.time_left)
+            self.time_left = self.boss.time_left
+            self.time_budget = max(0.1, self.time_left)
+            self.motion = 0.0
+            self.do_swap = False
+            self.prompt = "BOSS · SIMPLE PAST" if stage == "past" else "BOSS · PARTIZIP"
+            self._layout_targets(4)
+        else:
+            count = spec["targets"]
+            self.options = self.verb.options(self.rng, count)
+            self.correct_index = self.options.index(self.verb.simple_past)
+            self.time_left = question_seconds(
+                learned, fx, tier, self.streak, self.fever_active, suppressed)
+            self.time_budget = max(0.1, self.time_left)
+            self.motion = spec["speed"] * target_speed_scale(fx, tier)
+            self.do_swap = bool(spec["swap"]) and not suppressed
+            self.prompt = ""
+            self._layout_targets(count)
+            if self.do_swap and count >= 2:
+                idxs = list(range(count))
+                self.rng.shuffle(idxs)
+                self.swap_pair = (idxs[0], idxs[1])
+        self.phase = "play"
+        self.questions = getattr(self, "questions", 0) + 1
+        self._maybe_hint()
+        self.sound("pop")
+
     def new_run(self) -> None:
+        self._boot_combat_defaults()
         self.lives = STARTING_LIVES
+        self.max_lives = STARTING_LIVES
         self.correct_count = 0
         self.questions = 0
         self.streak = 0
@@ -550,8 +810,10 @@ class Game:
         self.hit_effects.clear()
         self.particles.clear()
         self.rings.clear()
-        self.deck = MasteryDeck(self.rng)
-        self.progress["runs"] += 1
+        if not hasattr(self, "verb_stats") or self.verb_stats is None:
+            self.verb_stats = {}
+        self.deck = MasteryDeck(self.rng, self.verb_stats)
+        self.progress["runs"] = self.progress.get("runs", 0) + 1
         self.save_progress()
         self.start_question()
 
@@ -559,20 +821,29 @@ class Game:
         if self.deck.complete:
             self.end_run()
             return
+        self.mode = "normal"
+        self.boss = None
         self.verb = self.deck.next()
-        self.options = self.verb.options(self.rng)
-        self.correct_index = self.options.index(self.verb.simple_past)
-        self.chosen_index = None
-        self.time_left = QUESTION_SECONDS
-        self.question_age = 0.0
-        self.shake = 0.0
-        self.flight_trail.clear()
-        upgrade_id = self.trial_pending or self.equipped
-        self.active_round = UPGRADE_BY_ID.get(upgrade_id) if upgrade_id else None
-        self.trial_pending = None
-        self.phase = "play"
-        self.questions += 1
-        self.sound("pop")
+        self._begin_round()
+
+    def start_bonus(self, verb: Verb) -> None:
+        self.mode = "bonus"
+        self.verb = verb
+        self._begin_round()
+
+    def open_boss(self, mark: int) -> None:
+        self.bosses_done.add(mark)
+        self.boss_queued = None
+        self._equip_active()
+        fx, tier = self.active_fx()
+        verb = pick_review_verb(
+            self.verb_stats, self.deck.missed, self.deck.mastered, self.rng, only_mastered=False)
+        assert verb is not None
+        retries = fx.charges_at(tier) if fx and fx.key == "penalty" else 0
+        self.boss = BossRound(verb=verb, mark=mark, retries=retries)
+        self.mode = "boss"
+        self.verb = verb
+        self._begin_round()
 
     def shop_items(self) -> tuple[Upgrade, ...]:
         """Sorted by level, with a separate view of everything already owned."""
@@ -630,7 +901,8 @@ class Game:
         self.progress["best"] = max(self.progress["best"], self.correct_count)
         self.progress["total_hits"] += self.correct_count
         if self.completed:
-            self.bonus_awarded = completion_bonus(self.deck.mistakes)
+            assisted = getattr(self.deck, "assisted_count", 0)
+            self.bonus_awarded = completion_bonus(self.deck.mistakes, assisted)
             self.coins += self.bonus_awarded
             self.progress["completions"] += 1
             prev = self.progress["best_mistakes"]
@@ -647,9 +919,18 @@ class Game:
                       timeout: bool = False) -> None:
         if self.phase != "play":
             return
+        if target is not None and target in self.eliminated:
+            target = None
         self.chosen_index = target
         self.outcome = "timeout" if timeout else "correct" if target == self.correct_index else "wrong"
-        self.winnings = reward(self.streak + 1, self.time_left) if self.outcome == "correct" else 0
+        self.shot_age = self.question_age
+        fx, _tier = self.active_fx()
+        stage = None
+        if self.mode == "boss" and self.boss is not None:
+            stage = "past" if self.boss.stage == 0 else "participle"
+        self.assisted = bool(self.hint_visible) and hint_assists(
+            fx, boss=self.mode == "boss", boss_stage=stage)
+        self.winnings = 0
         kind = self.active_round.theme.projectile if self.active_round else "chalk"
         tier = self.active_round.tier if self.active_round else 1
         self.flight_seconds = flight_duration(kind, tier)
@@ -666,26 +947,298 @@ class Game:
         if timeout:
             self.flight_seconds = 0.001
 
+    def _payout(self, fx, tier: int, assisted: bool, revenge: bool, old_streak: int) -> int:
+        radius = fx.value(tier) if fx and fx.key == "bullseye" else -1.0
+        center = self.center_dist <= radius
+        express = bool(fx and fx.key == "express" and self.shot_age <= fx.value_b(tier))
+        milestone = milestone_crossed(old_streak, self.streak, fx, tier)
+        return compute_reward(
+            self.streak, self.time_left, fx=fx, tier=tier, assisted=assisted,
+            fever=self.fever_active, revenge=revenge and not assisted,
+            express=express, center_hit=center, milestone=milestone,
+        )
+
+    def _apply_life_loss(self, fx) -> None:
+        kind = protection(
+            self.outcome,
+            fx.key if fx else None,
+            self.shield if fx and fx.key == "shield" else 0,
+            self.charges if fx and fx.key == "quench" else 0,
+        )
+        if kind == "shield":
+            self.shield = max(0, self.shield - 1)
+            self.life_note = "shield"
+            return
+        if kind == "quench":
+            self.charges = max(0, self.charges - 1)
+            self.life_note = "quench"
+            return
+        self.lives = max(0, self.lives - 1)
+
+    def _on_streak(self, old: int, fx, tier: int) -> None:
+        if fx and fx.key == "heal":
+            self.max_lives = int(fx.value_b(tier))
+            self.lives = heal_lives(old, self.streak, fx, tier, self.lives)
+        if fx and fx.key == "shield":
+            step = max(1, self.shield_regen)
+            self.shield_progress += max(0, self.streak - old)
+            while self.shield_progress >= step and self.shield < self.shield_max:
+                self.shield += 1
+                self.shield_progress -= step
+
+    def _queue_followups(self, fx, tier: int) -> None:
+        learned = self.deck.completed_count
+        if learned in BOSS_MARKS and learned not in self.bosses_done:
+            self.boss_queued = learned
+            return
+        if fx and fx.key == "chain_refresh" and self.deck.mastered and self.rng.random() < fx.value(tier):
+            verb = pick_review_verb(
+                self.verb_stats, self.deck.missed, self.deck.mastered, self.rng, only_mastered=True)
+            if verb is not None:
+                self.bonus_queued = verb
+
+    def _resolve_normal(self, success: bool, fx, tier: int) -> None:
+        name = self.verb.infinitive
+        run_index = int(self.progress.get("runs", 0))
+        revenge = is_revenge(name, self.deck.missed, self.verb_stats)
+        if self.rebound_used:
+            # Protection saves the life only if the second shot is right.
+            # The verb still counts as not-yet-learned.
+            self.deck.record(False)
+            touch_stat(self.verb_stats, name, outcome="wrong", run_index=run_index)
+            self.winnings = 0
+            self.streak = 0
+            if not success:
+                self._apply_life_loss(fx)
+            self.life_note = self.life_note or "rebound"
+            self.correct_count = self.deck.completed_count
+            self.sound("hit" if success else "miss")
+            at = self.shot_to if success or self.outcome != "timeout" else (640, 430)
+            self.spawn_burst(at, success)
+            self.save_progress()
+            return
+        self.deck.record(success, assisted=self.assisted_shot)
+        if success and self.assisted_shot:
+            touch_stat(self.verb_stats, name, outcome="assisted", run_index=run_index)
+            self.help_uses[name] = self.help_uses.get(name, 0) + 1
+            self.winnings = self._payout(fx, tier, True, False, self.streak)
+            self.coins += self.winnings
+            self.sound("hit")
+            self.spawn_burst(self.shot_to, True)
+        elif success:
+            touch_stat(self.verb_stats, name, outcome="clean", run_index=run_index)
+            old = self.streak
+            self.streak = streak_after_success(old, fx, tier, self.shot_age, False)
+            self._on_streak(old, fx, tier)
+            self.winnings = self._payout(fx, tier, False, revenge, old)
+            self.coins += self.winnings
+            self.time_bank = deposit_time_bank(self.time_bank, self.time_left, fx, tier)
+            fresh = fever_duration(self.streak, fx, tier)
+            if fresh:
+                self.fever_left = fresh
+            self._queue_followups(fx, tier)
+            self.sound("hit")
+            self.spawn_burst(self.shot_to, True)
+        else:
+            touch_stat(self.verb_stats, name, outcome="wrong", run_index=run_index)
+            self.winnings = 0
+            self._apply_life_loss(fx)
+            self.streak = streak_after_fail(self.streak, fx, tier)
+            self.shield_progress = 0
+            self.sound("miss")
+            at = self.shot_to if self.outcome != "timeout" else (640, 430)
+            self.spawn_burst(at, False)
+        self.correct_count = self.deck.completed_count
+        self.save_progress()
+
+    def _resolve_bonus(self, success: bool, fx, tier: int) -> None:
+        name = self.verb.infinitive
+        run_index = int(self.progress.get("runs", 0))
+        if success:
+            amount = int(round(fx.value_b(tier))) if fx and fx.key == "chain_refresh" else 40
+            self.winnings = amount
+            self.coins += amount
+            touch_stat(self.verb_stats, name, outcome="clean", run_index=run_index)
+            self.sound("hit")
+            self.spawn_burst(self.shot_to, True)
+        else:
+            self.winnings = 0
+            self.deck.unmaster(self.verb)
+            touch_stat(self.verb_stats, name, outcome="wrong", run_index=run_index)
+            self.life_note = "bonus"
+            self.sound("miss")
+            at = self.shot_to if self.outcome != "timeout" else (640, 430)
+            self.spawn_burst(at, False)
+        self.correct_count = self.deck.completed_count
+        self.save_progress()
+
+    def _resolve_boss_stage(self, success: bool) -> None:
+        assert self.boss is not None
+        self.boss.time_left = self.time_left
+        if success:
+            self.boss.parts_ok += 1
+            if self.assisted_shot:
+                name = self.boss.verb.infinitive
+                self.help_uses[name] = self.help_uses.get(name, 0) + 1
+            self.sound("hit")
+            self.spawn_burst(self.shot_to, True)
+        else:
+            self.boss.failed = True
+            self.sound("miss")
+            at = self.shot_to if self.outcome != "timeout" else (640, 430)
+            self.spawn_burst(at, False)
+        if self.boss.stage >= 1:
+            fx, tier = self.active_fx()
+            clear = self.boss.parts_ok >= 2
+            self.winnings = compute_reward(
+                0, 0, fx=fx, tier=tier, boss=True, boss_clear=clear,
+                assisted=bool(self.assisted_shot))
+        else:
+            self.winnings = 0
+
+    def finish_boss(self) -> None:
+        boss = self.boss
+        if boss is None:
+            return
+        fx, tier = self.active_fx()
+        clear = boss.parts_ok >= 2
+        assisted = bool(self.assisted_shot and boss.stage >= 1)
+        self.winnings = compute_reward(
+            0, 0, fx=fx, tier=tier, boss=True, boss_clear=clear, assisted=assisted)
+        if clear:
+            self.coins += self.winnings
+            self.sound("coins")
+        else:
+            self.winnings = 0
+            if self.outcome != "timeout":
+                self.outcome = "wrong"
+            self._apply_life_loss(fx)
+            self.streak = streak_after_fail(self.streak, fx, tier)
+            self.deck.unmaster(boss.verb)
+            touch_stat(self.verb_stats, boss.verb.infinitive, outcome="wrong",
+                       run_index=int(self.progress.get("runs", 0)))
+        self.correct_count = self.deck.completed_count
+        self.boss = None
+        self.mode = "normal"
+        self.save_progress()
+        if self.lives <= 0 or self.deck.complete:
+            self.end_run()
+        else:
+            self.start_shop()
+
+    def after_reveal(self) -> None:
+        if self.lives <= 0:
+            self.end_run()
+            return
+        if self.mode == "boss" and self.boss is not None and self.boss.stage == 0:
+            self.boss.stage = 1
+            self.verb = self.boss.verb
+            self._begin_round()
+            return
+        if self.mode == "boss" and self.boss is not None:
+            self.finish_boss()
+            return
+        if self.boss_queued:
+            mark = self.boss_queued
+            self.boss_queued = None
+            self.open_boss(mark)
+            return
+        if self.bonus_queued is not None:
+            verb = self.bonus_queued
+            self.bonus_queued = None
+            self.start_bonus(verb)
+            return
+        if self.deck.complete:
+            self.end_run()
+            return
+        self.start_shop()
+
     def resolve(self) -> None:
+        fx, tier = self.active_fx()
+        retries = self.boss.retries if self.mode == "boss" and self.boss is not None else 0
+        action = first_miss_action(
+            self.outcome, fx.key if fx else None, self.charges, self.rebound_used, retries)
+        if action == "rebound":
+            self.charges -= 1
+            self.rebound_used = True
+            if self.chosen_index is not None:
+                self.eliminated.add(self.chosen_index)
+                self.elim_style = "down"
+            self.streak = 0
+            self.shield_progress = 0
+            self.time_left = max(0.45, self.time_left + (fx.value(tier) if fx else 0.0))
+            self.phase = "play"
+            self.outcome = ""
+            self.sound("miss")
+            self.flash_message("ABGEPRALLT – NOCH EIN SCHUSS")
+            return
+        if action == "penalty" and self.boss is not None:
+            self.boss.retries -= 1
+            self.time_left = max(0.45, self.time_left + (fx.value(tier) if fx else 1.0))
+            self.boss.time_left = self.time_left
+            self.phase = "play"
+            self.eliminated.clear()
+            self.hint_visible = False
+            stage = "past" if self.boss.stage == 0 else "participle"
+            self.options = self.verb.boss_options(self.rng, stage)
+            answer = self.verb.simple_past if stage == "past" else self.verb.past_participle
+            self.correct_index = self.options.index(answer)
+            self.sound("miss")
+            self.flash_message("ELFMETER")
+            return
         self.phase = "impact"
         self.impact_elapsed = 0.0
         self.reveal_elapsed = 0.0
         success = self.outcome == "correct"
-        # Wrong answers, misses and timeouts go back into this run's deck.
-        self.deck.record(success)
-        if success:
-            self.streak += 1
-            self.correct_count = self.deck.completed_count
-            self.coins += self.winnings
-            self.sound("hit")
-            self.spawn_burst(self.shot_to, True)
-        else:
-            self.lives = max(0, self.lives - 1)
-            self.streak = 0
-            self.sound("miss")
-            at = self.shot_to if self.outcome != "timeout" else (640, 430)
-            self.spawn_burst(at, False)
-        self.save_progress()
+        self.assisted_shot = bool(success and self.assisted)
+        if self.mode == "boss":
+            self._resolve_boss_stage(success)
+            return
+        if self.mode == "bonus":
+            self._resolve_bonus(success, fx, tier)
+            return
+        self._resolve_normal(success, fx, tier)
+
+    def use_active(self) -> None:
+        """Right click: paint bomb, or a charged plasma EMP."""
+        if self.phase != "play":
+            return
+        fx, tier = self.active_fx()
+        if fx is None:
+            return
+        if fx.key == "paint_bomb":
+            if self.paint_used:
+                self.flash_message("FARBOMBE SCHON BENUTZT")
+                return
+            cost = paint_cost(fx, tier, self.streak)
+            if cost is None:
+                return
+            if self.coins < cost:
+                self.flash_message(f"DIR FEHLEN {cost - self.coins} MÜNZEN")
+                return
+            try:
+                idx = pick_elimination(self.correct_index, len(self.options), self.rng, self.eliminated)
+            except RuntimeError:
+                return
+            self.coins -= cost
+            self.eliminated.add(idx)
+            self.elim_style = "paint"
+            self.paint_used = True
+            self.hint_visible = True
+            self.sound("trial")
+            self.flash_message("FARBOMBE" if cost == 0 else f"FARBOMBE −{cost}")
+            self.save_progress()
+        elif fx.key == "emp" and self.mode == "normal" and not self.pressure_suppressed:
+            interval = emp_interval(fx, tier)
+            if self.emp_count < max(1, interval - 1):
+                self.flash_message("EMP LÄDT NOCH")
+                return
+            self.pressure_suppressed = True
+            self.emp_count = 0
+            self.motion = 0.0
+            self.do_swap = False
+            self._drop_fourth()
+            self.flash_message("EMP: DRUCK AUS")
 
     def spawn_burst(self, pos: tuple[float, float], success: bool) -> None:
         x, y = pos
@@ -728,6 +1281,10 @@ class Game:
         self.toast_age = 0.0
 
     def buy_or_equip(self, upgrade: Upgrade) -> None:
+        if upgrade.id not in self.owned and not tier_ready(upgrade.theme_index, upgrade.tier, self.owned):
+            self.sound("miss")
+            self.flash_message(f"ZUERST STUFE {upgrade.tier - 1} DIESER WAFFE")
+            return
         if upgrade.id in self.owned:
             self.equipped = upgrade.id
             self.trial_pending = None  # selecting a purchased weapon beats a preview shot
@@ -760,11 +1317,40 @@ class Game:
     def target_float(self, idx: int) -> float:
         return math.sin(self.time_elapsed * 2.2 + idx * .85) * 8.0
 
+    def target_x(self, idx: int) -> float:
+        slots = getattr(self, "slot_x", None) or [330.0, 640.0, 950.0]
+        if idx >= len(slots):
+            slots = [330.0, 640.0, 950.0]
+        base = float(slots[idx])
+        motion = getattr(self, "motion", 0.0) or 0.0
+        if motion <= 0 or self.phase not in ("play", "flight", "impact", "reveal"):
+            return base
+        amp = 70.0 if len(self.options) <= 3 else 52.0
+        return base + math.sin(self.question_age * (motion / amp) + idx * 1.7) * amp
+
     def target_rect(self, idx: int) -> pygame.Rect:
-        x = (330, 640, 950)[idx]
-        height = max(1, int(264 * max(.02, self.popup_progress())))
-        return pygame.Rect(x - 120, 529 + int(self.target_float(idx)) - height,
-                           240, height)
+        x = self.target_x(idx)
+        width = int(getattr(self, "target_w", 240))
+        board_h = 264 if width >= 220 else 220
+        height = max(1, int(board_h * max(.02, self.popup_progress())))
+        rect = pygame.Rect(0, 0, width, height)
+        rect.midbottom = (int(round(x)), 529 + int(self.target_float(idx)))
+        fx, tier = self.active_fx()
+        scale = hitbox_scale(fx, tier)
+        if scale != 1.0:
+            grow_w = int(rect.w * (scale - 1))
+            grow_h = int(rect.h * (scale - 1))
+            rect = rect.inflate(grow_w, grow_h)
+        return rect
+
+    def bullseye_center(self, idx: int) -> tuple[float, float]:
+        x = self.target_x(idx)
+        popup = max(.01, self.popup_progress())
+        width = int(getattr(self, "target_w", 240))
+        board_h = 264 if width >= 220 else 220
+        footer = 529 + self.target_float(idx)
+        cy = footer - board_h * popup + 66 * (board_h / 264.0) * popup
+        return x, cy
 
 
     def screen_mouse(self, p: tuple[int, int]) -> tuple[float, float] | None:
@@ -786,10 +1372,17 @@ class Game:
                 self.new_run()
         elif self.phase == "play":
             hit = None
-            for i in range(3):
+            for i in range(len(self.options)):
+                if i in self.eliminated:
+                    continue
                 if self.target_rect(i).collidepoint(x, y) and self.question_age >= .17:
                     hit = i
                     break
+            if hit is not None:
+                cx, cy = self.bullseye_center(hit)
+                self.center_dist = math.hypot(x - cx, y - cy)
+            else:
+                self.center_dist = 999.0
             self.register_shot(hit, (x, y))
         elif self.phase == "shop":
             if pygame.Rect(1034, 158, 198, 56).collidepoint(x, y):
@@ -826,9 +1419,24 @@ class Game:
         self.flash = max(0.0, self.flash - dt * 2)
         if self.phase == "play":
             self.question_age += dt
-            self.time_left = max(0, self.time_left - dt)
+            self.banner_age = getattr(self, "banner_age", 99.0) + dt
+            fx, tier = self.active_fx()
+            step = consume_timer(fx, tier, self.question_age, self.time_left, dt)
+            self.time_left = max(0.0, self.time_left - step)
+            self._maybe_hint()
+            if self.do_swap and not self.swapped and self.question_age >= self.time_budget * 0.5:
+                self.swapped = True
+                i, j = self.swap_pair
+                if i < len(self.slot_x) and j < len(self.slot_x):
+                    self.slot_x[i], self.slot_x[j] = self.slot_x[j], self.slot_x[i]
             if self.time_left <= 0:
-                self.register_shot(None, timeout=True)
+                if self.time_bank > 0.05:
+                    self.time_left = self.time_bank
+                    self.time_budget = max(self.time_budget, self.time_left)
+                    self.time_bank = 0.0
+                    self.flash_message("ZEITBANK")
+                else:
+                    self.register_shot(None, timeout=True)
         elif self.phase == "flight":
             # No time_left subtraction after a click; projectile choreography is free.
             self.flight_time += dt
@@ -848,10 +1456,7 @@ class Game:
         elif self.phase == "reveal":
             self.reveal_elapsed += dt
             if self.reveal_elapsed >= 1.75:
-                if self.lives <= 0 or self.deck.complete:
-                    self.end_run()
-                else:
-                    self.start_shop()
+                self.after_reveal()
         if self.phase == "end":
             self.victory_age += dt
         for effect in self.hit_effects:
@@ -900,9 +1505,12 @@ class Game:
 
     def draw_background(self) -> None:
         self.canvas.blit(self.gradient, (0, 0))
-        # Clean dark background with subtle columns; no giant solid cyan/purple ellipses.
-        for x in range(0, W + 1, 120):
-            pygame.draw.line(self.canvas, (13, 23, 42), (x, 0), (x, H), 1)
+        # Faint square grid over the navy gradient. Dark enough to stay behind text.
+        grid = (14, 22, 40)
+        for x in range(0, W + 1, 48):
+            pygame.draw.line(self.canvas, grid, (x, 0), (x, H), 1)
+        for y in range(0, H, 48):
+            pygame.draw.line(self.canvas, grid, (0, y), (W, y), 1)
         if self.phase not in ("play", "flight", "impact", "reveal", "menu"):
             return
         horizon = 548
@@ -943,6 +1551,39 @@ class Game:
         if not self.sound_on:
             pygame.draw.line(self.canvas, RED, (1212, 39), (1238, 66), 2)
 
+    def _hud_effect(self) -> str:
+        fx, tier = self.active_fx()
+        if fx is None:
+            return "AUSGERÜSTET" if getattr(self, "active_round", None) else "STANDARD"
+        line = fx.text(tier)
+        if fx.key == "shield":
+            line = f"{line} · {self.shield}"
+        elif fx.key == "time_bank" and self.time_bank > 0.05:
+            line = f"Zeitbank {self.time_bank:.1f} s"
+        elif self.fever_active:
+            line = "FIEBER · doppelte Münzen"
+        return line
+
+    def _hint_line(self) -> str:
+        fx, tier = self.active_fx()
+        if not self.hint_visible or fx is None:
+            return ""
+        verb = self.verb
+        if fx.key == "hint_sentence":
+            return verb.sentence
+        if fx.key == "cheat_sheet":
+            return verb.german
+        if fx.key == "pattern_bridge":
+            mastered = self.deck.mastered if getattr(self, "deck", None) else set()
+            return bridge_text(verb, mastered, tier)
+        if fx.key == "prism":
+            return PATTERN_BLURB.get(verb.pattern, verb.pattern)
+        if fx.key == "fifty_fifty":
+            return "Eine falsche Scheibe ist übermalt"
+        if fx.key == "paint_bomb":
+            return "Farbbombe: eine Falle ist grau"
+        return fx.text(tier)
+
     def draw_hearts(self) -> None:
         slots = [
             ((32, 627, 258, 72), CYAN),
@@ -956,10 +1597,15 @@ class Game:
                        border_width=1, shadow_offset=2)
         self.text(self.canvas, "LEBEN", 51, 660, 13, MUTED,
                   family="label")
-        for i in range(STARTING_LIVES):
+        hearts = max(STARTING_LIVES, getattr(self, "max_lives", STARTING_LIVES))
+        gap = 22 if hearts > 5 else 27
+        for i in range(hearts):
             color = RED if i < self.lives else (72, 81, 101)
-            draw_symbol(self.canvas, 131 + i * 27, 659, 10,
+            draw_symbol(self.canvas, 118 + i * gap, 659, 9 if hearts > 5 else 10,
                         "heart", color)
+        if getattr(self, "shield", 0) > 0:
+            for s in range(self.shield):
+                draw_symbol(self.canvas, 248 - s * 16, 642, 7, "bubble", (170, 220, 255), CYAN)
         self.text(self.canvas, "SERIE", 322, 653, 12, MUTED,
                   family="label")
         self.text(self.canvas, f"COMBO x{max(1, self.streak)}", 408, 671,
@@ -977,15 +1623,16 @@ class Game:
         self.text(self.canvas, str(self.deck.mistakes), 867, 651, 23,
                   GREEN if self.deck.mistakes == 0 else RED,
                   True, "right", family="number")
-        self.text(self.canvas, "AUSGER\u00dcSTET", 919, 645, 12, MUTED,
-                  family="label")
+        hud = self._hud_effect()
+        self.text(self.canvas, hud, 919, 645, 12, CYAN if self.active_round else MUTED,
+                  family="label", max_width=300)
         if self.active_round:
             theme = self.active_round.theme
             draw_symbol(self.canvas, 932, 669, 16, theme.projectile,
                         theme.color, theme.accent)
             gear = theme.title.upper()
             self.text(self.canvas, gear, 959, 668, 18, WHITE,
-                      True, family="title", max_width=216)
+                      True, family="title", max_width=200)
             self.text(self.canvas, f"LV {self.active_round.tier}", 1223, 668,
                       14, CYAN, True, "right", family="number", max_width=55)
         else:
@@ -994,9 +1641,16 @@ class Game:
 
     def draw_dummy(self, index: int, title: str, popup: float = 1.0,
                    state: str = "neutral") -> None:
-        xpos = (330, 640, 950)[index]
+        xpos = self.target_x(index)
         float_y = self.target_float(index)
-        state_color = GREEN if state == "correct" else RED if state == "wrong" else CYAN
+        if state == "eliminated":
+            state_color = (90, 98, 120)
+        elif state == "correct":
+            state_color = GREEN
+        elif state == "wrong":
+            state_color = RED
+        else:
+            state_color = CYAN
         w, h = 240, 264
         unit = pygame.Surface((w, h), pygame.SRCALPHA)
         center = (w // 2, 66)
@@ -1004,6 +1658,9 @@ class Game:
         for rad, thickness in ((62, 1), (48, 2), (35, 2), (18, 2)):
             pygame.draw.circle(unit, state_color, center, rad, thickness)
         pygame.draw.circle(unit, state_color, center, 9)
+        if state == "correct":
+            pygame.draw.circle(unit, (*GREEN, 80), center, 58)
+            pygame.draw.circle(unit, GREEN, center, 62, 4)
         for dx in (-78, 78):
             bx = center[0] + dx
             delta = 10 if dx < 0 else -10
@@ -1018,16 +1675,28 @@ class Game:
         self.text(unit, f"ZIEL {index + 1}", 111, 160,
                   14, state_color, False, family="label")
         plate = pygame.Rect(0, 174, 240, 80)
-        fill = mix(PANEL, state_color, .12 if state != "neutral" else 0.015)
+        fill = mix(PANEL, state_color,
+                   .62 if state == "correct" else .22 if state == "wrong" else 0.015)
         draw_panel(unit, plate, fill, state_color, cut=14,
                    border_width=2 if state == "correct" else 1,
                    shadow_offset=0)
+        ink = (150, 158, 176) if state == "eliminated" else WHITE
         self.text(unit, title, w // 2, 216,
-                  36 if len(title) < 7 else 30, WHITE, True, "center",
+                  36 if len(title) < 7 else 28, ink, True, "center",
                   family="title", max_width=211)
+        if state == "eliminated":
+            blot = (40, 70, 150) if getattr(self, "elim_style", "") == "ink" else (70, 74, 88)
+            pygame.draw.circle(unit, blot, (w // 2, 66), 58)
+            pygame.draw.circle(unit, (20, 26, 40), (w // 2, 66), 58, 3)
+            if getattr(self, "elim_style", "") == "down":
+                pygame.draw.line(unit, RED, (40, 200), (200, 190), 4)
         # Target extends upward from a consistent stand, with sinusoidal bobbing.
         yfactor = max(.01, popup)
-        unit = pygame.transform.smoothscale(unit, (w, max(2, int(h * yfactor))))
+        if state == "eliminated" and getattr(self, "elim_style", "") == "down":
+            yfactor *= 0.22
+        draw_w = int(getattr(self, "target_w", w))
+        draw_h = max(2, int(h * (draw_w / w) * yfactor))
+        unit = pygame.transform.smoothscale(unit, (max(2, draw_w), draw_h))
         footer = 529 + int(float_y)
         shadow = pygame.Surface((160, 18), pygame.SRCALPHA)
         pygame.draw.ellipse(shadow, (*state_color, 19), (0, 1, 160, 13))
@@ -1036,38 +1705,159 @@ class Game:
         if state == "correct":
             glow_circle(self.canvas, (xpos, 330 + int(float_y)), 36, GREEN, 1, 3)
 
+    def _question_caption(self) -> tuple[str, str]:
+        mode = getattr(self, "mode", "normal")
+        boss = getattr(self, "boss", None)
+        if mode == "boss" and boss is not None and boss.stage >= 1:
+            shown = self.verb.simple_past.upper()
+            if len(shown) > 16:
+                shown = shown[:16]
+            return "BOSS-RUNDE  ·  PARTIZIP", f"{shown}  →  ?"
+        if mode == "boss":
+            return "BOSS-RUNDE  ·  SIMPLE PAST", self.verb.infinitive.upper()
+        if mode == "bonus":
+            return "AUFFRISCHUNG  ·  SCHON GELERNT", self.verb.infinitive.upper()
+        return "WIE LAUTET DAS SIMPLE PAST VON ...?", self.verb.infinitive.upper()
+
+    def _draw_time_segments(self) -> None:
+        segments = 18
+        gap = 6
+        total = 420
+        x0, y = 410, 218
+        seg_w = (total - gap * (segments - 1)) / segments
+        budget = max(0.1, getattr(self, "time_budget", QUESTION_SECONDS))
+        ratio = max(0.0, min(1.0, self.time_left / budget))
+        filled = int(round(ratio * segments))
+
+        def bar_glow(layer: pygame.Surface) -> None:
+            pygame.draw.rect(layer, (20, 70, 80), pygame.Rect(8, 6, total, 14), border_radius=4)
+        additive_stamp(self.canvas, (total + 16, 28), (x0 - 8, y - 8), bar_glow)
+        for i in range(segments):
+            rect = pygame.Rect(int(x0 + i * (seg_w + gap)), y, max(4, int(seg_w)), 13)
+            if i < filled:
+                t = i / max(1, segments - 1)
+                col = mix(CYAN, GOLD, t * 0.85)
+                rounded(self.canvas, rect, col, radius=2)
+            else:
+                rounded(self.canvas, rect, (32, 44, 70), radius=2)
+
+    def draw_hit_flourish(self) -> None:
+        if self.phase != "impact" or self.outcome != "correct":
+            return
+        cx, cy = self.bullseye_center(self.correct_index)
+        side = 300
+        def paint(layer: pygame.Surface) -> None:
+            mid = side // 2
+            for i in range(16):
+                angle = -math.pi / 2 + i * math.tau / 16 + self.impact_elapsed * 0.6
+                inner = 34
+                outer = 86 + (i % 4) * 16
+                col = GREEN if i % 2 == 0 else (90, 210, 255)
+                pygame.draw.line(
+                    layer, col,
+                    point(mid + math.cos(angle) * inner, mid + math.sin(angle) * inner),
+                    point(mid + math.cos(angle) * outer, mid + math.sin(angle) * outer), 2)
+            drop = random.Random(5)
+            for i in range(12):
+                angle = drop.random() * math.tau
+                dist = 36 + drop.random() * 62
+                pygame.draw.circle(
+                    layer, (70, 180, 255),
+                    point(mid + math.cos(angle) * dist, mid + math.sin(angle) * dist),
+                    2 + (i % 3))
+        additive_stamp(self.canvas, (side, side), (int(cx - side / 2), int(cy - side / 2)), paint)
+        badge = pygame.Rect(int(cx + 96), int(cy - 28), 72, 32)
+        draw_panel(self.canvas, badge, ORANGE, GOLD, cut=7, border_width=1, shadow_offset=0)
+        self.text(self.canvas, f"+{self.winnings}", badge.centerx, badge.centery,
+                  16, BG, True, "center", family="number", max_width=64)
+        combo = pygame.Rect(badge.right + 8, badge.y, 48, 30)
+        draw_panel(self.canvas, combo, (28, 16, 18), ORANGE, cut=7, border_width=1, shadow_offset=0)
+        self.text(self.canvas, f"x{max(1, self.streak)}", combo.centerx, combo.centery,
+                  15, ORANGE, True, "center", family="number", max_width=42)
+        tag = pygame.Surface((132, 30), pygame.SRCALPHA)
+        pygame.draw.rect(tag, GREEN, (0, 0, 132, 30))
+        glyph = self.font(16, True, "title").render("TREFFER!", True, (8, 16, 10))
+        tag.blit(glyph, glyph.get_rect(center=(66, 15)))
+        tilted = pygame.transform.rotate(tag, -8)
+        self.canvas.blit(tilted, tilted.get_rect(center=(int(cx + 78), int(cy + 86))))
+
     def draw_play(self) -> None:
         self.header()
-        self.text(self.canvas, "WIE LAUTET DAS SIMPLE PAST VON ...?", 640, 115,
-                  18, MUTED, False, "center", family="label")
-        self.text(self.canvas, self.verb.infinitive.upper(), 640, 172,
-                  78, WHITE, True, "center", family="title", max_width=440)
-        # Progress stripe and right-aligned timer ring (draw.arc as requested).
-        completed = self.correct_count / len(VERBS)
-        rounded(self.canvas, (427, 220, 421, 9), (26, 34, 57), radius=4)
-        if completed:
-            rounded(self.canvas, (427, 220, max(3, int(421 * completed)), 9), CYAN, radius=4)
-        timer_rect = pygame.Rect(850, 123, 99, 99)
-        ratio = max(0, min(1, self.time_left / QUESTION_SECONDS))
-        tint = ORANGE if ratio < .3 else GOLD
-        pygame.draw.arc(self.canvas, (48, 58, 83), timer_rect, -math.pi / 2,
+        caption, word = self._question_caption()
+        self.text(self.canvas, caption, 640, 112,
+                  16, MUTED, False, "center", family="label", max_width=620)
+        size = 78 if len(word) <= 8 else 54 if len(word) <= 14 else 40
+        font = self.font(size, True, "title")
+        verb_img = font.render(word, True, WHITE)
+        verb_rect = verb_img.get_rect(center=(640, 168))
+        glow_text(self.canvas, verb_img, verb_rect, CYAN, 3)
+        self.canvas.blit(verb_img, verb_rect)
+        self._draw_time_segments()
+        if getattr(self, "banner", "") and getattr(self, "banner_age", 99) < 2.2 and self.phase == "play":
+            self.text(self.canvas, self.banner, 640, 246, 15, GOLD, True,
+                      "center", family="title", max_width=420)
+        timer_rect = pygame.Rect(850, 118, 99, 99)
+        budget = max(0.1, getattr(self, "time_budget", QUESTION_SECONDS))
+        ratio = max(0, min(1, self.time_left / budget))
+        fx, tier = self.active_fx()
+        frozen = bool(fx and fx.key == "freeze" and self.phase == "play"
+                      and self.question_age < fx.value(tier))
+        tint = CYAN if frozen else ORANGE if ratio < .3 else GOLD
+        pygame.draw.arc(self.canvas, (40, 50, 74), timer_rect, -math.pi / 2,
                         1.5 * math.pi, 6)
         if ratio > .001:
-            pygame.draw.arc(self.canvas, tint, timer_rect, -math.pi / 2,
-                            -math.pi / 2 + math.tau * ratio, 7)
-        self.text(self.canvas, f"{self.time_left:0.1f}", 899, 164,
+            start = -math.pi / 2
+            end = start + math.tau * ratio
+
+            def arc_glow(layer, start=start, end=end, tint=tint):
+                shifted = timer_rect.move(-828, -104)
+                pygame.draw.arc(layer, tint, shifted, start, end, 8)
+            additive_stamp(self.canvas, (140, 140), (828, 104), arc_glow)
+            pygame.draw.arc(self.canvas, tint, timer_rect, start, end, 7)
+        self.text(self.canvas, f"{self.time_left:0.1f}", 899, 160,
                   26, GOLD, True, "center", family="number")
-        self.text(self.canvas, "STOP" if self.phase in ("flight", "impact") else "SEK",
-                  899, 192, 12, CYAN if self.phase in ("flight", "impact") else MUTED,
+        clock_label = "EIS" if frozen else "STOP" if self.phase == "flight" else "SEK"
+        self.text(self.canvas, clock_label, 899, 188, 12,
+                  CYAN if frozen or self.phase in ("flight", "impact") else MUTED,
                   False, "center", family="label")
+        if getattr(self, "time_bank", 0) > 0.05:
+            self.text(self.canvas, f"BANK {self.time_bank:.1f}", 899, 210, 11,
+                      CYAN, True, "center", family="number", max_width=90)
         popup = self.popup_progress()
-        for i, word in enumerate(self.options):
-            self.draw_dummy(i, word, popup)
-        self.text(self.canvas, "KLICK AUF DIE RICHTIGE FORM  *  EIN SCHUSS  *  5 SEKUNDEN",
-                  640, 603, 13, MUTED, False, "center", family="label")
+        for i, word_i in enumerate(self.options):
+            state = "eliminated" if i in getattr(self, "eliminated", set()) else "neutral"
+            if self.phase == "impact":
+                if self.outcome == "correct" and i == self.correct_index:
+                    state = "correct"
+                elif self.outcome != "correct" and i == self.chosen_index:
+                    state = "wrong"
+            self.draw_dummy(i, word_i, popup, state)
+        if self.phase == "impact":
+            self.draw_hit_flourish()
+        hint = self._hint_line() if self.phase == "play" and self.hint_visible else ""
+        if hint and fx and fx.key == "hint_sentence" and tier >= 6 and self.verb.signal in hint:
+            before, _, after = hint.partition(self.verb.signal)
+            bits = ((before, WHITE), (self.verb.signal, GOLD), (after, WHITE))
+            widths = []
+            fonts = self.font(16, False, "label")
+            for text, _color in bits:
+                widths.append(fonts.size(text)[0] if text else 0)
+            total = sum(widths)
+            x = 640 - total / 2
+            y = 603
+            for (text, color), width in zip(bits, widths):
+                if text:
+                    self.text(self.canvas, text, x, y, 16, color, False, "left", family="label")
+                    x += width
+        elif hint:
+            self.text(self.canvas, hint, 640, 603, 16, CYAN, False,
+                      "center", family="label", max_width=900)
+        else:
+            self.text(self.canvas, "KLICK AUF DIE RICHTIGE FORM  *  EIN SCHUSS  *  5 SEKUNDEN",
+                      640, 603, 13, MUTED, False, "center", family="label")
         self.draw_hearts()
         x, y = self.mouse
-        if 60 < x < 1220 and 260 < y < 530:
+        if self.phase == "play" and 60 < x < 1220 and 260 < y < 530:
             pygame.draw.circle(self.canvas, CYAN, point(x, y), 15, 1)
             pygame.draw.circle(self.canvas, WHITE, point(x, y), 2)
             pygame.draw.line(self.canvas, CYAN, point(x - 20, y), point(x - 8, y), 1)
@@ -1123,25 +1913,59 @@ class Game:
 
     def draw_reveal(self) -> None:
         self.header()
-        self.text(self.canvas, "WIE LAUTET DAS SIMPLE PAST VON ...?", 640, 115,
-                  18, MUTED, False, "center", family="label")
-        self.text(self.canvas, self.verb.infinitive.upper(), 640, 172,
-                  78, WHITE, True, "center", family="title")
-        for i, word in enumerate(self.options):
+        caption, word = self._question_caption()
+        self.text(self.canvas, caption, 640, 112, 16, MUTED, False,
+                  "center", family="label", max_width=640)
+        self.text(self.canvas, word, 640, 168,
+                  64 if len(word) < 16 else 42, WHITE, True, "center",
+                  family="title", max_width=760)
+        for i, word_i in enumerate(self.options):
             state = "correct" if i == self.correct_index else "wrong" if i == self.chosen_index else "neutral"
-            self.draw_dummy(i, word, 1, state)
+            self.draw_dummy(i, word_i, 1, state)
         success = self.outcome == "correct"
-        color = GREEN if success else ORANGE if self.outcome == "timeout" else RED
-        # Foreground correction panel ensures answer is readable over target FX.
+        assisted = bool(getattr(self, "assisted_shot", False))
+        note = getattr(self, "life_note", "")
+        if success and assisted:
+            color, title = GOLD, "MIT HILFE"
+        elif success and note == "rebound":
+            color, title = CYAN, "NACHGESCHOSSEN"
+        elif success:
+            color, title = GREEN, "TREFFER!"
+        elif note == "shield":
+            color, title = CYAN, "SCHILD HÄLT"
+        elif note == "quench":
+            color, title = CYAN, "GELÖSCHT"
+        elif note == "bonus":
+            color, title = ORANGE, "AUFFRISCHUNG DANEBEN"
+        elif self.outcome == "timeout":
+            color, title = ORANGE, "ZEIT ABGELAUFEN!"
+        else:
+            color, title = RED, "DANEBEN!"
+        answer = self.verb.simple_past
+        if getattr(self, "mode", "") == "boss" and getattr(self, "boss", None) and self.boss.stage >= 1:
+            answer = self.verb.past_participle
         draw_panel(self.canvas, (286, 347, 708, 140), PANEL, color,
                    cut=16, border_width=2, shadow_offset=4)
-        title = "TREFFER!" if success else "ZEIT ABGELAUFEN!" if self.outcome == "timeout" else "DANEBEN!"
         self.text(self.canvas, title, 640, 375, 22, color, True,
                   "center", family="title", max_width=640)
-        self.text(self.canvas, "RICHTIG: " + self.verb.simple_past.upper(),
+        self.text(self.canvas, "RICHTIG: " + answer.upper(),
                   640, 421, 35, WHITE, True, "center", family="title", max_width=650)
-        self.text(self.canvas, f"+{self.winnings} M\u00dcNZEN" if success else "-1 LEBEN",
-                  640, 465, 17, GOLD if success else color, True,
+        if success and note == "rebound":
+            footer = "LEBEN GERETTET · VERB KOMMT WIEDER"
+            footer_color = CYAN
+        elif success and assisted:
+            footer = f"+{self.winnings} MÜNZEN · VERB KOMMT WIEDER"
+            footer_color = GOLD
+        elif success:
+            footer = f"+{self.winnings} MÜNZEN"
+            footer_color = GOLD
+        elif note in ("shield", "quench", "bonus"):
+            footer = "KEIN LEBEN VERLOREN"
+            footer_color = CYAN
+        else:
+            footer = "-1 LEBEN"
+            footer_color = color
+        self.text(self.canvas, footer, 640, 465, 17, footer_color, True,
                   "center", family="number")
         self.draw_hearts()
 
@@ -1197,13 +2021,22 @@ class Game:
         pygame.draw.rect(self.canvas, rarity_col, label)
         self.text(self.canvas, rarity_name, label.centerx, label.centery,
                   11, BG, True, "center", family="label", max_width=98)
-        self.text(self.canvas, f"STUFE {tier}/10  *  {upgrade.name.rsplit(' ', 1)[-1]}",
-                  rect.x + 100, rect.y + 91, 13, MUTED,
-                  False, family="label", max_width=rect.w - 119)
+        self.text(self.canvas, f"STUFE {tier}/10  ·  {upgrade.effect_line}",
+                  rect.x + 100, rect.y + 90, 12, CYAN,
+                  False, family="label", max_width=rect.w - 118)
         for i in range(10):
-            seg = pygame.Rect(rect.x + 18 + i * 35, rect.y + 107, 29, 7)
-            rounded(self.canvas, seg,
-                    rarity_col if i < tier else (34, 42, 71), radius=2)
+            seg = pygame.Rect(rect.x + 18 + i * 35, rect.y + 108, 29, 7)
+            if i < tier:
+                seg_copy = seg.copy()
+
+                def dash_glow(layer, seg_copy=seg_copy, rarity_col=rarity_col):
+                    pygame.draw.rect(layer, rarity_col,
+                                     pygame.Rect(5, 4, seg_copy.w, seg_copy.h), border_radius=2)
+                additive_stamp(self.canvas, (seg.w + 10, seg.h + 8),
+                               (seg.x - 5, seg.y - 4), dash_glow)
+                rounded(self.canvas, seg, rarity_col, radius=2)
+            else:
+                rounded(self.canvas, seg, (34, 42, 71), radius=2)
         state = "ANGELEGT" if equipped else "AUSR\u00dcSTEN" if owned else "KAUFEN" if affordable else "ZU TEUER"
         action_r = pygame.Rect(rect.x + 18, rect.bottom - 51, 130, 36)
         if affordable and not owned:
@@ -1218,8 +2051,15 @@ class Game:
             draw_panel(self.canvas, action_r, PANEL_DARK, (70, 81, 111),
                        cut=8, shadow_offset=1)
             action_ink = MUTED
-        self.text(self.canvas, state, action_r.centerx, action_r.centery,
-                  14, action_ink, True, "center", family="label", max_width=118)
+        if state == "ZU TEUER":
+            lock = (action_r.x + 16, action_r.centery)
+            pygame.draw.rect(self.canvas, MUTED, (lock[0], lock[1] - 3, 10, 8), 1)
+            pygame.draw.arc(self.canvas, MUTED, (lock[0] + 1, lock[1] - 9, 8, 8), 0, math.pi, 1)
+            self.text(self.canvas, state, action_r.centerx + 8, action_r.centery,
+                      13, action_ink, True, "center", family="label", max_width=100)
+        else:
+            self.text(self.canvas, state, action_r.centerx, action_r.centery,
+                      14, action_ink, True, "center", family="label", max_width=118)
         if owned:
             self.text(self.canvas, "IM BESITZ", rect.right - 20,
                       rect.bottom - 34, 13, GREEN, True, "right", family="label")
@@ -1232,8 +2072,13 @@ class Game:
 
     def draw_shop(self) -> None:
         self.header()
-        self.text(self.canvas, "MUNITIONS-WERKSTATT", 32, 115, 32,
-                  WHITE, True, family="title", max_width=690)
+        title_font = self.font(32, True, "title")
+        left = title_font.render("MUNITIONS", True, WHITE)
+        hyphen = title_font.render("-", True, MAGENTA)
+        right = title_font.render("WERKSTATT", True, WHITE)
+        self.canvas.blit(left, (32, 96))
+        self.canvas.blit(hyphen, (32 + left.get_width() + 2, 96))
+        self.canvas.blit(right, (32 + left.get_width() + hyphen.get_width() + 6, 96))
         draw_panel(self.canvas, (930, 94, 150, 39), PANEL, CYAN,
                    cut=8, border_width=1, shadow_offset=1)
         self.text(self.canvas, f"{self.correct_count}/{len(VERBS)} GELERNT", 1005, 114,
@@ -1282,11 +2127,8 @@ class Game:
         self.button(pygame.Rect(552, 645, 194, 46),
                     f"GEKAUFT ({len(self.owned)})", GREEN,
                     secondary=self.shop_view != "owned", size=14)
-        if page_items:
-            low, high = page_items[0].tier, page_items[-1].tier
-            level_label = f"LV {low}" if low == high else f"LV {low}-{high}"
-            self.text(self.canvas, level_label, 823, 665, 14, GOLD,
-                      True, "center", family="number", max_width=108)
+        self.text(self.canvas, "Klick: kaufen oder ausrüsten", 872, 668,
+                  15, MUTED, False, "center", family="label", max_width=200)
         self.button(pygame.Rect(994, 638, 236, 51),
                     "NÄCHSTE FRAGE  >", CYAN, size=18)
         if self.toast and self.toast_age < 2.4:
@@ -1332,8 +2174,18 @@ class Game:
         else:
             self.text(self.canvas, "ABSCHLUSS-BONUS: ALLE VERBEN RICHTIG LÖSEN",
                       W // 2, 472, 15, MUTED, True, "center", family="label")
-        self.text(self.canvas, f"BESTER RUN: {self.progress['best']}/{len(VERBS)}  ·  ABGESCHLOSSEN: {self.progress['completions']}",
-                  W // 2, 517, 13, MUTED, True, "center", family="label")
+        weak = [
+            name for name, stat in sorted(getattr(self, "verb_stats", {}).items())
+            if isinstance(stat, dict) and int(stat.get("box", 5)) <= 1
+            and (int(stat.get("wrong", 0)) or int(stat.get("assisted", 0)))
+        ]
+        if weak:
+            shown = ", ".join(weak[:8])
+            self.text(self.canvas, "NOCH ÜBEN: " + shown, W // 2, 512, 14, GOLD,
+                      True, "center", family="label", max_width=680)
+        else:
+            self.text(self.canvas, f"BESTER RUN: {self.progress['best']}/{len(VERBS)}  ·  ABGESCHLOSSEN: {self.progress['completions']}",
+                      W // 2, 517, 13, MUTED, True, "center", family="label")
         self.button(pygame.Rect(449, 540, 382, 58), "NOCHMAL SPIELEN", CYAN, size=21)
         self.button(pygame.Rect(501, 611, 278, 44), "BEENDEN", CYAN, secondary=True, size=16)
 
@@ -1382,6 +2234,8 @@ class Game:
                     self.running = False
                 elif event.type == pygame.VIDEORESIZE:
                     self.window = pygame.display.set_mode((max(640, event.w), max(360, event.h)), pygame.RESIZABLE)
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
+                    self.use_active()
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     mapped = self.screen_mouse(event.pos)
                     if mapped:
@@ -1390,16 +2244,39 @@ class Game:
             self.render()
             frames += 1
             if smoke_test and frames == 4:
-                # Exercise play, timer, a correct shot, particle FX and the shop.
+                # Exercise play, a hinted shot, particle FX, the shop and a rebound.
+                self.equipped = next(u.id for u in UPGRADES if u.theme.projectile == "chalk" and u.tier == 1)
+                self.owned.add(self.equipped)
                 self.new_run()
+                self.question_age = 4.0
+                self._maybe_hint()
                 self.register_shot(self.correct_index, (640, 480))
-            if smoke_test and frames == 12:
-                self.resolve() if self.phase == "flight" else None
+            if smoke_test and frames == 10:
+                while self.phase == "flight":
+                    self.update(0.05)
+                self.equipped = next(u.id for u in UPGRADES if u.theme.projectile == "gold" and u.tier == 5)
+                self.owned.add(self.equipped)
+                if self.phase != "end":
+                    self.start_shop()
+                    self.render()
+                    if self.lives > 0 and not self.deck.complete:
+                        self.start_question()
+                        self.register_shot(self.correct_index, self.bullseye_center(self.correct_index))
+            if smoke_test and frames == 16:
+                while self.phase == "flight":
+                    self.update(0.05)
+                rubber = next(u.id for u in UPGRADES if u.theme.projectile == "rubber" and u.tier == 4)
+                self.equipped = rubber
+                self.owned.add(rubber)
+                if self.lives > 0 and not self.deck.complete and self.phase != "end":
+                    self.start_question()
+                    self.register_shot(None, (120, 300))
+                    self.resolve()
+                    if self.phase == "play":
+                        self.register_shot(self.correct_index, self.bullseye_center(self.correct_index))
                 self.start_shop()
-                self.trial()
-                self.start_question()
-                self.register_shot(None, timeout=True)
-            if smoke_test and frames >= 18:
+                self.use_active()
+            if smoke_test and frames >= 22:
                 break
         self.save_progress()
         pygame.quit()
