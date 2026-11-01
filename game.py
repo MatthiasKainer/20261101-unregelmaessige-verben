@@ -1117,7 +1117,7 @@ class Game:
         pygame.draw.rect(self.canvas, rarity_col, label)
         self.text(self.canvas, rarity_name, label.centerx, label.centery,
                   11, BG, True, "center", family="label", max_width=98)
-        self.text(self.canvas, f"STUFE {tier}/10  *  {upgrade.name.split(' * ')[-1].split(' \u00b7 ')[-1]}",
+        self.text(self.canvas, f"STUFE {tier}/10  *  {upgrade.name.rsplit(' ', 1)[-1]}",
                   rect.x + 100, rect.y + 91, 13, MUTED,
                   False, family="label", max_width=rect.w - 119)
         for i in range(10):
